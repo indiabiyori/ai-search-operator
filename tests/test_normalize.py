@@ -2,6 +2,7 @@
 """normalize_observations.py のテスト。テストのデータはすべて架空のもの。"""
 import codecs
 import contextlib
+import csv
 import io
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 # python3 -m unittest tests.test_normalize でも、discover -s tests でも helpers を読めるようにする
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -753,6 +755,80 @@ class ReferenceLinksTest(TempDirCase):
                          [("body", "https://coffee-guide.example/a"), ("body", "https://kakuucoffee.example/beans")])
 
 
+class ChatgptChipTest(TempDirCase):
+    """
+    ChatGPT の出典チップ（リンクの文字がサイト名のもの）。回答をコピーすると ([サイト名][1]) か
+    ([サイト名](URL)) の形になる。チップは出典の表示なので、言及として数えない。架空の例。
+    """
+    REF_CHIP = ("浅煎りの豆は専門店で買うのがよいとされています ([架空珈琲][1]) - 比較のために焙煎日も見ます。\n\n"
+                "[1]: https://kakuu-coffee.example/beans?utm_source=chatgpt.com \"浅煎りの豆\"")
+
+    def test_reference_chip_with_site_name_removed(self):
+        out = norm.strip_urls(self.REF_CHIP)
+        self.assertNotIn("架空珈琲", out)
+        self.assertIn("とされています", out)
+        self.assertIn("比較のために焙煎日も見ます。", out)
+        self.assertEqual(norm.extract_urls(self.REF_CHIP),
+                         ["https://kakuu-coffee.example/beans?utm_source=chatgpt.com"])
+
+    def test_inline_chip_with_site_name_removed(self):
+        text = "人気です。 ([架空珈琲](https://kakuu-coffee.example/a?utm_source=chatgpt.com)) 以上"
+        out = norm.strip_urls(text)
+        self.assertNotIn("架空珈琲", out)
+        self.assertIn("人気です。", out)
+        self.assertIn("以上", out)
+        self.assertEqual(norm.extract_urls(text), ["https://kakuu-coffee.example/a?utm_source=chatgpt.com"])
+
+    def test_chip_variants_removed(self):
+        for text in ("人気です ([架空珈琲][1])。",  # 定義の行がない
+                     "人気です ([架空珈琲][])。\n\n[架空珈琲]: https://kakuu-coffee.example/",
+                     "人気です ( [架空珈琲](https://kakuu-coffee.example/) )。",
+                     "人気です ([架空珈琲][1], [サンプル焙煎][2])。\n\n[1]: https://kakuu-coffee.example/\n"
+                     "[2]: https://sample-roast.example/",
+                     "人気です ([架空珈琲](https://kakuu-coffee.example/)、[サンプル焙煎](https://sample-roast.example/))。"):
+            with self.subTest(text=text):
+                out = norm.strip_urls(text)
+                self.assertNotIn("架空珈琲", out)
+                self.assertNotIn("サンプル焙煎", out)
+                self.assertIn("人気です", out)
+                self.assertIn("。", out)
+
+    def test_links_in_prose_kept(self):
+        # かっこの中にリンクのほかの文字がある、全角のかっこ、かっこなしのリンクは、回答の文とみなして残す
+        for text in ("[架空珈琲](https://kakuu-coffee.example/)の豆が人気です",
+                     "有名店（[架空珈琲](https://kakuu-coffee.example/)）の豆が人気です",
+                     "有名店 (たとえば [架空珈琲](https://kakuu-coffee.example/)) の豆が人気です",
+                     "有名店 ([架空珈琲](https://kakuu-coffee.example/) など) の豆が人気です",
+                     "[架空珈琲][1]の豆が人気です\n\n[1]: https://kakuu-coffee.example/"):
+            with self.subTest(text=text):
+                self.assertIn("架空珈琲", norm.strip_urls(text))
+
+    def test_parentheses_without_links_kept(self):
+        self.assertIn("架空珈琲", norm.strip_urls("有名店 (架空珈琲) の豆が人気です"))
+        self.assertIn("架空珈琲", norm.strip_urls("有名店 ([架空珈琲]) の豆が人気です"))
+
+    def test_non_branded_answer_with_chip_only_is_not_a_mention(self):
+        # 実地の確認で見つかった形: 本文に社名はなく、出典チップだけがある
+        row, cits, _ = self.process(answer_text(answer=self.REF_CHIP, sources=None))
+        self.assertEqual(row["own_mentioned"], 0)
+        self.assertEqual(row["own_mention_snippet"], "")
+        self.assertEqual(row["own_cited"], 1)  # 引用としては数える
+        self.assertEqual([(c["location"], c["entity_id"]) for c in cits], [("body", "own-company")])
+
+    def test_competitor_chip_is_not_a_mention(self):
+        text = ("浅煎りの豆は専門店で買えます ([サンプル焙煎][1])\n\n"
+                "[1]: https://sample-roast.example/light?utm_source=chatgpt.com")
+        row, _cits, _ = self.process(answer_text(answer=text, sources=None))
+        self.assertEqual(row["competitors_mentioned"], "")
+        self.assertEqual(row["competitors_cited"], "comp-a")
+
+    def test_mention_outside_chip_still_counted(self):
+        text = "架空珈琲の浅煎りが人気です ([架空珈琲][1])\n\n[1]: https://kakuu-coffee.example/"
+        row, _cits, _ = self.process(answer_text(answer=text, sources=None))
+        self.assertEqual(row["own_mentioned"], 1)
+        self.assertEqual(row["own_mention_snippet"], "架空珈琲の浅煎りが人気です")
+
+
 class ObservedAtTest(TempDirCase):
     """observed_at の日付。compare_runs.py が読む YYYY-MM-DD の形にそろえる。"""
 
@@ -1083,6 +1159,158 @@ class MainTest(TempDirCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage", result.stdout)
         self.assertIn("--workspace", result.stdout)
+
+    def test_missing_entities_without_hint_when_current_folder_has_none(self):
+        ws = self.copy_workspace()
+        os.remove(os.path.join(ws, "entities.csv"))
+        result = self.run_main(["--workspace", ws])
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("--workspace .", result.stderr)
+
+    def test_running_inside_the_workspace_hints_workspace_dot(self):
+        # ai-search/ の中で --workspace を付けずに実行した。entities.csv を作り直すよう促さない
+        ws = self.copy_workspace()
+        result = self.run_main([], cwd=ws)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--workspace .", result.stderr)
+        self.assertNotIn("先に書いてください", result.stderr)
+        result = self.run_main(["--workspace", "."], cwd=ws)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rate_rounds_half_up_like_compare_runs(self):
+        # 1/16 = 6.25%。compare_runs.py と同じく四捨五入して 6.3% にする（偶数丸めの 6.2% にしない）
+        ws = os.path.join(self.tmp, "ai-search")
+        os.makedirs(ws)
+        for name in ("entities.csv", "prompts.csv"):
+            shutil.copy(os.path.join(WORKSPACE, name), os.path.join(ws, name))
+        for n in range(1, 17):
+            answer = "架空珈琲の豆が人気です。" if n == 1 else "専門店の豆が人気です。"
+            self.write("ai-search/answers/2026-10-01/chatgpt/P001-{}.md".format(n),
+                       text=answer_text(meta={"repeat": str(n)}, answer=answer, sources="1. https://x.example/"))
+        result = self.run_main(["--workspace", ws])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("自社の言及: 1/16（6.3%）", result.stderr)
+        self.assertEqual(norm.common.format_rate(5, 80), "5/80（6.3%）")
+
+
+class LoadErrorTest(TempDirCase):
+    """entities.csv と prompts.csv を読めないときは、入力の誤り（終了コード 2）にする。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.ws = os.path.join(self.tmp, "ai-search")
+        shutil.copytree(WORKSPACE, self.ws)
+
+    def run_in_process(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = norm.main(["--workspace", self.ws])
+        return code, err.getvalue()
+
+    def test_csv_error_in_entities(self):
+        # Python 3.9 の csv は NUL を含む行で csv.Error を出す（3.13 は通すので、モックで両方の版で確かめる）
+        with mock.patch.object(common, "read_csv", side_effect=csv.Error("line contains NUL")):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 2, err)
+        self.assertIn("entities.csv を CSV として読めません", err)
+        self.assertIn("NUL", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_csv_error_in_prompts(self):
+        original = common.read_csv
+
+        def fake(path):
+            if os.path.basename(path) == "prompts.csv":
+                raise csv.Error("line contains NUL")
+            return original(path)
+
+        with mock.patch.object(common, "read_csv", side_effect=fake):
+            code, err = self.run_in_process()
+        self.assertEqual(code, 2, err)
+        self.assertIn("prompts.csv を CSV として読めません", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_unreadable_entities(self):
+        if not hasattr(os, "geteuid") or os.geteuid() == 0:
+            self.skipTest("root か Windows では読み取りの権限を外せない")
+        path = os.path.join(self.ws, "entities.csv")
+        os.chmod(path, 0)
+        try:
+            code, err = self.run_in_process()
+        finally:
+            os.chmod(path, 0o644)
+        self.assertEqual(code, 2, err)
+        self.assertIn("entities.csv を読めません", err)
+        self.assertNotIn("Traceback", err)
+
+
+class ModeWarningTest(TempDirCase):
+    """mode の書き忘れと表記の揺れ。どちらも compare_runs.py では別の組になり、前後の比較から外れる。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.ws = os.path.join(self.tmp, "ai-search")
+        os.makedirs(self.ws)
+        for name in ("entities.csv", "prompts.csv"):
+            shutil.copy(os.path.join(WORKSPACE, name), os.path.join(self.ws, name))
+
+    def add(self, name, service="chatgpt", round_name="2026-10-01", **meta):
+        pid, repeat = name.rsplit("-", 1)
+        values = {"round": round_name, "prompt_id": pid, "repeat": repeat, "service": service, "prompt": ""}
+        values.update(meta)
+        self.write("ai-search/answers/{}/{}/{}.md".format(round_name, service, name), text=answer_text(meta=values))
+
+    def run_rows(self):
+        result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = common.read_csv(os.path.join(self.ws, "observations.csv"))[1]
+        return {r["answer_file"].split("/", 2)[2]: r for r in rows}, result.stderr
+
+    def test_empty_mode_of_a_recorded_answer_is_warned(self):
+        self.add("P001-1", mode="検索あり")
+        self.add("P001-2", mode="")
+        rows, err = self.run_rows()
+        self.assertIn("mode が空です", rows["chatgpt/P001-2.md"]["warnings"])
+        self.assertNotIn("mode", rows["chatgpt/P001-1.md"]["warnings"])
+        self.assertIn("警告のある回答: 1 件", err)
+
+    def test_empty_mode_of_an_unfilled_template_is_not_warned(self):
+        self.write("ai-search/answers/2026-10-01/chatgpt/P001-1.md",
+                   text=answer_text(meta={"mode": ""}, answer="", sources=""))
+        rows, _err = self.run_rows()
+        row = rows["chatgpt/P001-1.md"]
+        self.assertEqual(row["status"], "未記入")
+        self.assertNotIn("mode", row["warnings"])
+
+    def test_mode_variants_in_the_same_round_and_service_are_warned(self):
+        self.add("P001-1", mode="検索あり")
+        self.add("P001-2", mode="検索あり")
+        self.add("P002-1", mode="検索 あり")
+        self.add("P002-2", mode="検索あり・Ｔｈｉｎｋ")
+        self.add("P003-1", mode="検索あり・think")
+        self.add("P003-2", mode="検索あり・Think")
+        rows, err = self.run_rows()
+        self.assertIn("mode の表記が、同じラウンド・サービスのほかの回答と違います: 検索 あり（ほかの回答: 検索あり）",
+                      rows["chatgpt/P002-1.md"]["warnings"])
+        for name in ("P001-1", "P001-2"):
+            self.assertNotIn("mode", rows["chatgpt/{}.md".format(name)]["warnings"], name)
+        # 揺れの3つ（全角・半角、大文字・小文字）は同じ数なので、どれにも警告する
+        for name in ("P002-2", "P003-1", "P003-2"):
+            self.assertIn("mode の表記が", rows["chatgpt/{}.md".format(name)]["warnings"], name)
+        self.assertIn("警告のある回答: 4 件", err)
+
+    def test_modes_in_other_services_or_rounds_are_not_compared(self):
+        self.add("P001-1", mode="検索あり")
+        self.add("P001-2", service="gemini", mode="検索 あり")
+        self.add("P001-3", round_name="2026-10-08", mode="検索 あり")
+        rows, err = self.run_rows()
+        self.assertIn("警告のある回答: 0 件", err)
+
+    def test_different_modes_are_not_variants(self):
+        self.add("P001-1", mode="検索あり")
+        self.add("P001-2", mode="自動")
+        _rows, err = self.run_rows()
+        self.assertIn("警告のある回答: 0 件", err)
 
 
 if __name__ == "__main__":

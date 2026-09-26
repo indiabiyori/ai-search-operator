@@ -6,7 +6,8 @@ new_round.py - 観測ラウンドの回答ファイルのひな形を作る
 目的:
   1回の観測（ラウンド）で記録する回答ファイルを、プロンプト × サービス × 回数の数だけ作る。
   先頭の欄（round、prompt_id、prompt、service など）を埋め、本文には見出し（## 回答、## 出典）だけを置く。
-  利用者は AI の回答と出典を貼り付け、observed_at を尋ねた日時に直し、mode を書き足す。
+  利用者は AI の回答と出典を貼り付け、observed_at を尋ねた日時に直す。mode は --mode で全ファイルに入れられる
+  （付けなければ空。利用者が回答を貼るときに書く）。
 
 入力:
   <ワークスペース>/prompts.csv（既定のワークスペースは実行したフォルダの ai-search）。
@@ -22,8 +23,10 @@ new_round.py - 観測ラウンドの回答ファイルのひな形を作る
 出力:
   <ワークスペース>/answers/<ラウンド>/<サービス>/<プロンプトID>-<回数>.md
   - 同じ名前のファイルがあれば上書きしない（作らなかった件数を表示する）。そのファイルの先頭の欄の
-    round、prompt_id、surface、login、region、language が今回の指定と違えば警告する。ファイルの名前に
-    条件（surface など）は入らないので、条件を変えて観測するときは別のラウンド名にする。
+    round、prompt_id、surface、login、region、language（--mode を付けたときは mode も）が今回の指定と違えば
+    警告する。ファイルの名前に条件（surface など）は入らないので、条件を変えて観測するときは別のラウンド名にする。
+  - mode は --mode の値（付けなければ空）。「/」、「行頭か空白の直後の #」、制御文字を含む値は入力エラーにする
+    （/ は compare_runs.py の primary_group の区切り、# は先頭の欄のコメントの印のため）。前後の空白は除く。
   - observed_at には、ラウンド名が日付（YYYY-MM-DD）ならその日付と空白を入れる。利用者は尋ねた日時に直す
     （1ラウンドを複数の日に分けるので、別の日に尋ねたら日付も直す）。日付でなければ空にする。
   - status と sources_status は空にする。空なら normalize_observations.py が回答と URL の有無から決めるので、
@@ -64,6 +67,7 @@ from ai_search_common import (  # noqa: E402
     parse_front_matter,
     parse_id_list,
     read_text,
+    workspace_hint,
 )
 
 # 回答ファイルの先頭の欄（この順番で書く）。templates/answer.md と同じ
@@ -88,6 +92,8 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TOKEN_RE = re.compile(r"[^\s#\x00-\x1f\x7f]*")
 # 「行頭か空白」の直後の #。先頭の欄では、そこから後ろがコメントとして読み飛ばされる
 _COMMENT_HASH_RE = re.compile(r"(^|\s)#")
+# mode に入れてはいけない文字（改行・タブを含む制御文字と /）
+_MODE_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f/]")
 _NEWLINE_RE = re.compile(r"\s*[\r\n]+\s*")
 # prompt に入れてはいけない制御文字（改行 \n \r とタブ \t は除く。改行は空白に置き換えて書く）
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -95,7 +101,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 NEXT_STEPS = (
     "次の手順: 毎回新しい会話で prompt の文を尋ね、回答を ## 回答、出典の URL を ## 出典 に貼る。"
     "observed_at は尋ねた日時にする（開始日を入れてあるので、別の日に尋ねたら日付も直す）。"
-    "mode にモードを書く。貼り終えたら normalize_observations.py を実行する"
+    "mode が空なら、ラウンドの前に決めた表記を書く。貼り終えたら normalize_observations.py を実行する"
 )
 
 # OSError の理由（errno）を日本語で示す
@@ -208,9 +214,22 @@ def _check_selected(prompts, selected):
             ", ".join(control)))
 
 
+def _check_mode(mode):
+    # type: (str) -> str
+    """--mode の値を確かめ、前後の空白を除いて返す。誤りは InputError。"""
+    mode = (mode or "").strip()
+    if _MODE_FORBIDDEN_RE.search(mode):
+        raise InputError("--mode には「/」と制御文字を含めないでください（/ は compare_runs.py の primary_group の"
+                         "区切りに使うため。モデル名を足すなら「検索あり・Think」のように ・ でつなぐ）: {!r}".format(mode))
+    if _COMMENT_HASH_RE.search(mode):
+        raise InputError("--mode に「行頭か空白の直後の #」を含めないでください（回答ファイルの先頭の欄では、そこから後ろが"
+                         "コメントとして読み飛ばされるため）: {!r}".format(mode))
+    return mode
+
+
 def plan_round(prompts, round_name, services, repeats, prompt_ids,
-               surface="web", login="なし", region="JP", language="ja"):
-    # type: (dict, str, list, int, list, str, str, str, str) -> list
+               surface="web", login="なし", region="JP", language="ja", mode=""):
+    # type: (dict, str, list, int, list, str, str, str, str, str) -> list
     """
     作る回答ファイルの一覧を返す。要素は (ワークスペースからの相対パス（/ 区切り）, 先頭の欄の辞書)。
     並びはプロンプト → サービス → 回数の順。引数の誤りは InputError にする。
@@ -237,6 +256,7 @@ def plan_round(prompts, round_name, services, repeats, prompt_ids,
     for option, value in (("--region", region), ("--language", language)):
         if not _TOKEN_RE.fullmatch(value):
             raise InputError("{} には空白、#、制御文字を含めないでください: {!r}".format(option, value))
+    mode = _check_mode(mode)
 
     selected = _select_prompts(prompts, prompt_ids)
     _check_selected(prompts, selected)
@@ -255,7 +275,7 @@ def plan_round(prompts, round_name, services, repeats, prompt_ids,
                 rel = "answers/{}/{}/{}-{}.md".format(round_name, service, pid, n)
                 meta = {
                     "round": round_name, "prompt_id": pid, "prompt": text, "observed_at": observed_at,
-                    "service": service, "surface": surface, "mode": "", "login": login, "region": region,
+                    "service": service, "surface": surface, "mode": mode, "login": login, "region": region,
                     "repeat": str(n), "language": language, "status": "", "sources_status": "",
                     "accuracy": "未確認", "accuracy_note": "", "reviewed_by": "",
                 }
@@ -266,7 +286,8 @@ def plan_round(prompts, round_name, services, repeats, prompt_ids,
 def compare_existing(path, meta):
     # type: (str, dict) -> list
     """
-    既にある回答ファイルの先頭の欄を読み、COMPARE_FIELDS のうち今回の指定と違う欄を説明する文の一覧を返す。
+    既にある回答ファイルの先頭の欄を読み、COMPARE_FIELDS（meta の mode が空でなければ mode も）のうち
+    今回の指定と違う欄を説明する文の一覧を返す。
     同じなら空の一覧。読めないときは、その理由を1つだけ入れて返す。
     """
     if not os.path.isfile(path):
@@ -279,7 +300,9 @@ def compare_existing(path, meta):
     if not existing:
         return ["先頭の欄を読めません（{}）".format(errors[0] if errors else "欄がありません")]
     out = []
-    for key in COMPARE_FIELDS:
+    # mode は --mode を付けたときだけ比べる（付けなければ、利用者が記入した mode と比べても意味がない）
+    fields = COMPARE_FIELDS + ("mode",) if meta.get("mode") else COMPARE_FIELDS
+    for key in fields:
         old = existing.get(key, "")
         new = meta.get(key, "")
         if old == new:
@@ -382,16 +405,17 @@ prompts.csv の active が yes のプロンプト（--prompts があればその
 同じ名前のファイルがあれば上書きしない。"""
 
 EPILOG = """例:
-  python3 new_round.py --round 2026-10-01 --services chatgpt,google-ai-mode --repeats 3
+  python3 new_round.py --round 2026-10-01 --services chatgpt,google-ai-mode --repeats 3 --mode 検索あり
 
 作ったあと:
   各サービスで毎回新しい会話を開いて prompt の文を尋ね、回答の本文を ## 回答 に、出典の URL を ## 出典 に貼る。
   observed_at は尋ねた日時にする（開始日を入れてあるので、別の日に尋ねたら日付も直す）。
-  mode にモード（例: 検索あり）を書く。AI の回答が出なかった・拒否された・エラーになったときは
-  status に書く（AI の回答なし / 回答拒否 / エラー）。貼り終えたら normalize_observations.py を実行する。
+  --mode を付けなかったときは、mode にラウンドの前に決めた表記（例: 検索あり）を書く。
+  AI の回答が出なかった・拒否された・エラーになったときは status に書く（AI の回答なし / 回答拒否 / エラー）。
+  貼り終えたら normalize_observations.py を実行する。
 
 条件を変えるとき:
-  回答ファイルの名前に --surface、--login、--region、--language の値は入らない。
+  回答ファイルの名前に --surface、--login、--mode、--region、--language の値は入らない。
   同じラウンドで条件を変えて観測するときは、別のラウンド名にする。
 
 終了コード: 0 = 成功、2 = 入力・引数の誤り、1 = 想定外のエラー"""
@@ -409,6 +433,9 @@ def build_parser():
     parser.add_argument("--workspace", default="ai-search", help="観測データのフォルダ（既定 ai-search。作業フォルダの中の ai-search/）")
     parser.add_argument("--surface", default="web", help="画面か API か: {}（既定 web）".format(" / ".join(SURFACES)))
     parser.add_argument("--login", default="なし", help="ログインの状態: {}（既定 なし）".format(" / ".join(LOGINS)))
+    parser.add_argument("--mode", default="",
+                        help="全ファイルの mode に入れる値（例: 検索あり、検索あり・Think）。既定は空（回答を貼るときに書く）。"
+                             "「/」と「空白の直後の #」は使えない")
     parser.add_argument("--region", default="JP", help="地域（既定 JP）")
     parser.add_argument("--language", default="ja", help="回答の言語の設定（既定 ja）")
     parser.add_argument("--prompts", default="",
@@ -433,12 +460,16 @@ def run(args):
     # type: (argparse.Namespace) -> int
     prompts_path = os.path.join(args.workspace, "prompts.csv")
     if not os.path.isfile(prompts_path):
+        hint = workspace_hint(prompts_path, "prompts.csv")
+        if hint:
+            raise InputError("{} がありません。{}".format(prompts_path, hint))
         raise InputError("{} がありません。先に prompts.csv を作ってください（templates/prompts.csv と手順書 02）".format(
             prompts_path))
     prompts = _load_prompts(prompts_path)
     services = parse_id_list(args.services)
     plan = plan_round(prompts, args.round_name, services, args.repeats, parse_id_list(args.prompts),
-                      surface=args.surface, login=args.login, region=args.region, language=args.language)
+                      surface=args.surface, login=args.login, region=args.region, language=args.language,
+                      mode=args.mode)
     created, skipped, differences = write_round(args.workspace, plan)
 
     n_prompts = len(plan) // (len(services) * args.repeats)
@@ -451,8 +482,10 @@ def run(args):
             log("  {}: {}".format(rel, "、".join(diff)))
         if len(differences) > MAX_LISTED:
             log("  ほか {} 件".format(len(differences) - MAX_LISTED))
-        log("  ファイルの名前に条件（surface、login、region、language）は入りません。"
+        log("  ファイルの名前に条件（surface、login、mode、region、language）は入りません。"
             "条件を変えて観測するときは、別のラウンド名にしてください")
+        if any(item.startswith("mode=空") for _rel, diff in differences for item in diff):
+            log("  mode が空の既存のファイルは、--mode の値で上書きしていません。回答を貼るときに mode を書いてください")
     log("このラウンドの記録数: {} プロンプト × {} サービス × {} 回 = {} 件".format(
         n_prompts, len(services), args.repeats, len(plan)))
     log(NEXT_STEPS)

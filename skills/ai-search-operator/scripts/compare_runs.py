@@ -50,16 +50,26 @@ normalize_observations.py が作った observations.csv を読み、次のどち
   - --group-by を既定から変えた（primary_group と組が対応しない）
   control_prompts が空のまま（対照を置かない実験）は、事前の条件どおりなので確認的な判定を出し、
   「対照がないため、サービス側の変動と区別できない」と添える。
+  primary_group の組が判定の表にないときは、確認的な判定を「判定不能」とし、理由を分けて示す。
+  片方の期間にしか有効な回答がない組なら「変更後（前）の期間にこの組の有効な回答がない」。
+  どちらの期間にも有効な回答がない組なら「この組の有効な回答が、指定したラウンドにない」。
+  観測したどの組とも一致しなければ、書き誤りの可能性として、観測した組の一覧を警告に出す。
+  標準エラーの要約も同じ理由で示す。
 
 primary_group の書き方:
-  service/surface/login/mode/region/language を / で区切る。mode には表示モデル名（例:
-  GPT-5 Thinking/検索あり）を書くことがあり / を含みうるので、前から3つと後ろから2つを取り、
-  残りを mode とみなす。
+  service/surface/login/mode/region/language を / で区切る（例: chatgpt/web/なし/検索あり・Think/JP/ja）。
+  mode の値は手順書の決まり（検索あり、モデル名を足すなら「検索あり・Think」）に合わせて書く。
+  mode に / が入っていても読めるよう、前から3つと後ろから2つを取り、残りを mode とみなす。
 
 有効な回答がない組:
-  new_round.py のひな形は mode が空なので、未記入のひな形だけの組ができる。有効な回答（と AI の回答
-  なし）が1件もない組は、判定・集計の表から外して「有効な回答がない組」の節にまとめる。組の有無、
-  観測した日数、モードの違いの警告も、有効な回答だけで確かめる。
+  new_round.py を --mode なしで使うと、ひな形の mode が空なので、未記入のひな形だけの組ができる。
+  有効な回答（と AI の回答なし）が1件もない組は、判定・集計の表から外して「有効な回答がない組」の節に
+  まとめる。組の有無、観測した日数、モードの違いの警告も、有効な回答だけで確かめる。
+
+片方の期間にしか有効な回答がない組（比較）:
+  変更後のラウンドを一部のサービスだけで作ると、ほかのサービスの組は変更前にしか有効な回答がない。
+  この組は比べられないので、判定の表と「探索的な判定の内訳」から外し、「比較できない組」の節にまとめる
+  （有効な回答の件数と AI の回答の表示率を添える）。警告は組ごとに1行だけ出す。
 
 observed_at の日付:
   normalize_observations.py と同じく、文中の 2026-10-29、2026/10/29、2026-10-1 のような形を日付として読む。
@@ -116,9 +126,11 @@ from ai_search_common import (  # noqa: E402
     normalize_text,
     parse_front_matter,
     parse_id_list,
+    format_rate,
     read_csv,
     read_text,
     split_list,
+    workspace_hint,
     write_csv,
 )
 
@@ -383,9 +395,10 @@ def _parse_primary_group(raw, path):
     # type: (str, str) -> tuple
     """
     primary_group（service/surface/login/mode/region/language）を6要素のタプルにする。
-    mode には表示モデル名（例: GPT-5 Thinking/検索あり）を書くことがあり、/ を含みうる。
-    service・surface・login は決まった値、region・language は短い符号なので / を含まない。
-    そこで、前から3つと後ろから2つを取り、残りをそのまま mode とする。
+    mode の例は手順書（03）と同じ「検索あり・Think」の形で、new_round.py の --mode は / を受け付けない。
+    それでも手で書いた mode に / が入っていても読めるよう、前から3つと後ろから2つを取り、残りを
+    そのまま mode とする。service・surface・login は決まった値、region・language は短い符号なので
+    / を含まない。
     """
     n = len(DEFAULT_GROUP_BY)
     if len(raw.split("/")) < n:
@@ -568,15 +581,6 @@ def _places_for(value, places=3):
     return places
 
 
-def format_rate(k, n):
-    # type: (int, int) -> str
-    """「k/n（xx.x%）」。割合は小数第1位で四捨五入する。"""
-    if not n:
-        return "{}/{}（分母なし）".format(k, n)
-    pct = _round_half_up(Fraction(k * 100, n), 1)
-    return "{}/{}（{:.1f}%）".format(k, n, pct)
-
-
 def _fmt_diff(value, places=None):
     # type: (object, object) -> str
     """差の表示（符号付き、既定は小数第3位）。"""
@@ -713,8 +717,8 @@ def _is_observed(row):
 def _split_empty_groups(groups):
     # type: (dict) -> tuple
     """
-    組を (表に出す組, 有効な回答がない組) に分ける。new_round.py のひな形は mode が空なので、未記入の
-    ひな形だけの組（mode が空の組）ができる。この組は観測を表さないので、判定や集計の表に出さない。
+    組を (表に出す組, 有効な回答がない組) に分ける。new_round.py を --mode なしで使うと、ひな形の mode が
+    空なので、未記入のひな形だけの組（mode が空の組）ができる。この組は観測を表さないので、判定や集計の表に出さない。
     """
     kept, empty = {}, {}
     for key, g_rows in groups.items():
@@ -988,7 +992,7 @@ def _empty_groups_section(empty_groups, counts=None):
         return []
     lines = ["", "## 有効な回答がない組", "",
              "未記入のひな形・エラー・回答拒否などの回答だけの組。判定と集計の表には入れていない。"
-             "new_round.py のひな形は mode が空なので、記入すると本来の組に移る。", ""]
+             "new_round.py を --mode なしで使うと、ひな形の mode が空なので、記入すると本来の組に移る。", ""]
     for key in sorted(empty_groups):
         g_rows = empty_groups[key]
         count = (counts or {}).get(key) or "回答 {} 件".format(len(g_rows))
@@ -1031,13 +1035,17 @@ def _judge_set(b_rows, a_rows, ids, metric, alpha, min_repeats, min_effect):
 def compare_groups(before_rows, after_rows, targets, controls, metrics, group_by, alpha, min_repeats,
                    min_effect):
     # type: (list, list, list, list, list, tuple, float, int, object) -> list
-    """組ごと・指標ごとの判定の一覧。有効な回答がない組（未記入のひな形だけの組など）は判定しない。"""
+    """
+    組ごと・指標ごとの判定の一覧。有効な回答がない組（未記入のひな形だけの組など）と、片方の期間にしか
+    有効な回答がない組（one_sided_compare_groups）は判定しない。
+    """
     b_groups = _group_rows(before_rows, group_by)
     a_groups = _group_rows(after_rows, group_by)
     empty = empty_compare_groups(before_rows, after_rows, group_by)[0]
+    one_sided = one_sided_compare_groups(before_rows, after_rows, group_by)
     results = []
     for key in sorted(set(b_groups) | set(a_groups)):
-        if key in empty:
+        if key in empty or key in one_sided:
             continue
         b_rows = b_groups.get(key, [])
         a_rows = a_groups.get(key, [])
@@ -1080,6 +1088,41 @@ def empty_compare_groups(before_rows, after_rows, group_by):
     counts = dict((key, "前 {} 件、後 {} 件".format(len(b_groups.get(key, [])), len(a_groups.get(key, []))))
                   for key in empty)
     return empty, counts
+
+
+def one_sided_compare_groups(before_rows, after_rows, group_by):
+    # type: (list, list, tuple) -> dict
+    """
+    片方の期間にしか有効な回答（valid_mention が 1）がない組。組 → 有効な回答がない期間（"変更前" か "変更後"）。
+    変更後のラウンドを一部のサービスだけで作ったときなどにできる。比べられないので判定しない。
+    """
+    b_valid = set(group_key(r, group_by) for r in before_rows if _is_valid(r))
+    a_valid = set(group_key(r, group_by) for r in after_rows if _is_valid(r))
+    return dict((key, "変更後" if key in b_valid else "変更前") for key in b_valid ^ a_valid)
+
+
+def _one_sided_reason(missing):
+    # type: (str) -> str
+    return "{}の期間にこの組の有効な回答がない".format(missing)
+
+
+def _not_comparable_section(one_sided, before_rows, after_rows, group_by):
+    # type: (dict, list, list, tuple) -> list
+    """比較できない組（片方の期間にしか有効な回答がない組）の節。なければ空。"""
+    if not one_sided:
+        return []
+    b_groups = _group_rows(before_rows, group_by)
+    a_groups = _group_rows(after_rows, group_by)
+    lines = ["", "## 比較できない組", "",
+             "片方の期間にしか有効な回答がない組。判定の表と「探索的な判定の内訳」には入れていない。"
+             "実験に使わなかったサービスの組（変更後のラウンドを一部のサービスだけで作ったときなど）がここに入る。", ""]
+    for key in sorted(one_sided):
+        b_rows, a_rows = b_groups.get(key, []), a_groups.get(key, [])
+        lines.append("- {}: {}（有効な回答: 前 {} 件、後 {} 件。AI の回答の表示: 前 {}、後 {}）".format(
+            _cell(group_label(key)), _one_sided_reason(one_sided[key]),
+            sum(1 for r in b_rows if _is_valid(r)), sum(1 for r in a_rows if _is_valid(r)),
+            format_rate(*count_metric(b_rows, "display")), format_rate(*count_metric(a_rows, "display"))))
+    return lines
 
 
 def detail_rows(results):
@@ -1137,7 +1180,7 @@ def compare_warnings(before_rows, after_rows, results, group_by, experiment, run
         b_rows = b_groups.get(key, [])
         a_rows = a_groups.get(key, [])
         if not b_rows or not a_rows:
-            warnings.append("{}: この組は有効な回答が{}の期間にしかない（比較できない）".format(
+            warnings.append("{}: この組は有効な回答が{}の期間にしかない（比較できない。「比較できない組」を参照）".format(
                 label, "前" if b_rows else "後"))
             continue
         b_dates, a_dates = _dates(b_rows), _dates(a_rows)
@@ -1291,6 +1334,9 @@ def render_compare(results, ctx, warnings):
     lines.append("- " + _run_info_line(ctx["run_info"]))
     for note in ctx["notes"]:
         lines.append("- " + note)
+    if ctx["one_sided"]:
+        lines.append("- 比較できない組: {}（片方の期間にしか有効な回答がない。「比較できない組」の節にまとめた）".format(
+            len(ctx["one_sided"])))
 
     judged = [r for r in results if r["metric"] is not None]
     lines += ["", "## 結論", ""]
@@ -1302,8 +1348,7 @@ def render_compare(results, ctx, warnings):
                 text += "。" + final["reason"]
             lines.append(text)
         else:
-            lines.append("- 確認的な判定（{}）: 判定不能。この組の有効な回答が、指定したラウンドにない".format(
-                ctx["confirm_label"]))
+            lines.append("- 確認的な判定（{}）: 判定不能。{}".format(ctx["confirm_label"], ctx["confirm_missing"]))
         lines.append("- そのほかの組・指標の結果はすべて探索的。")
     elif experiment:
         lines.append("- 確認的な判定: 出さない（{}）。すべて探索的な比較として扱う。".format(ctx["no_confirm_reason"]))
@@ -1337,6 +1382,7 @@ def render_compare(results, ctx, warnings):
 
     lines += ["", "## 外したプロンプト", ""]
     lines += _excluded_lines(results)
+    lines += ctx["not_comparable_lines"]
     lines += _empty_groups_section(ctx["empty_groups"], ctx["empty_counts"])
     lines += _warnings_section(warnings)
     lines += [
@@ -1458,6 +1504,12 @@ def run_compare(args, rows, run_info, group_by, warnings):
                 confirm = res
                 break
     warnings += compare_warnings(before_rows, after_rows, results, group_by, experiment, run_info, before, after)
+    empty_groups, empty_counts = empty_compare_groups(before_rows, after_rows, group_by)
+    one_sided = one_sided_compare_groups(before_rows, after_rows, group_by)
+    confirm_missing = confirm_short = ""
+    if confirm_label and confirm is None:
+        confirm_missing, confirm_short = _confirm_missing_reason(
+            primary_group, one_sided, empty_groups, before_rows + after_rows, group_by, warnings)
     # どの回答にもない ID（打ち間違い）。組ごとの「この組で観測がない」だけでは気づきにくい
     seen = set(r.get("prompt_id") for r in before_rows + after_rows)
     for ids, set_label in ((targets, "対象"), (controls, "対照")):
@@ -1465,20 +1517,48 @@ def run_compare(args, rows, run_info, group_by, warnings):
         if unknown:
             warnings.append("{}のプロンプトのうち、指定したラウンドのどの回答にもない ID: {}（打ち間違いでないか"
                             "確かめる）".format(set_label, ", ".join(unknown)))
-    empty_groups, empty_counts = empty_compare_groups(before_rows, after_rows, group_by)
     ctx = {
         "experiment": experiment, "confirm": confirm, "confirm_label": confirm_label,
-        "no_confirm_reason": no_confirm_reason, "before_rounds": before, "after_rounds": after,
-        "targets": targets, "controls": controls, "alpha": alpha, "min_repeats": min_repeats,
-        "min_effect": min_effect, "group_by": group_by, "run_info": run_info, "notes": notes,
-        "empty_groups": empty_groups, "empty_counts": empty_counts,
+        "confirm_missing": confirm_missing, "no_confirm_reason": no_confirm_reason, "before_rounds": before,
+        "after_rounds": after, "targets": targets, "controls": controls, "alpha": alpha,
+        "min_repeats": min_repeats, "min_effect": min_effect, "group_by": group_by, "run_info": run_info,
+        "notes": notes, "empty_groups": empty_groups, "empty_counts": empty_counts, "one_sided": one_sided,
+        "not_comparable_lines": _not_comparable_section(one_sided, before_rows, after_rows, group_by),
     }
     text = render_compare(results, ctx, _dedupe(warnings))
     judged = [r for r in results if r["metric"] is not None]
+    if confirm:
+        confirm_text = "確認的な判定: {}".format(confirm["final"]["verdict"])
+    elif confirm_label:
+        confirm_text = "確認的な判定: 判定不能（{}）".format(confirm_short)
+    else:
+        confirm_text = "すべて探索的"
     summary = "比較しました: 組 {} 件、判定 {} 件（{}）".format(
-        len(set(r["key"] for r in results)), len(judged),
-        "確認的な判定: {}".format(confirm["final"]["verdict"]) if confirm else "すべて探索的")
+        len(set(r["key"] for r in results)), len(judged), confirm_text)
     return text, summary, results
+
+
+def _confirm_missing_reason(primary_group, one_sided, empty_groups, rows, group_by, warnings):
+    # type: (tuple, dict, dict, list, tuple, list) -> tuple
+    """
+    primary_group の組が判定の表にないときの (報告の理由, 標準エラーの要約の理由)。観測したどの組とも
+    一致しなければ、書き誤りの可能性として、観測した組の一覧を warnings に足す。
+    """
+    for key, missing in sorted(one_sided.items()):
+        if _same_group(key, primary_group):
+            reason = _one_sided_reason(missing)
+            return reason + "（「比較できない組」を参照）", reason
+    if any(_same_group(key, primary_group) for key in empty_groups):
+        return ("この組の有効な回答が、指定したラウンドにない（「有効な回答がない組」を参照）",
+                "この組の有効な回答がない")
+    observed = sorted(set(group_key(r, group_by) for r in rows if _is_valid(r)))
+    listed = "、".join("/".join(key) for key in observed[:10]) or "なし"
+    if len(observed) > 10:
+        listed += " ほか {} 組".format(len(observed) - 10)
+    warnings.append("実験の記録の primary_group（{}）に一致する組が、指定したラウンドの有効な回答にない。"
+                    "書き誤りでないか確かめる（観測した組: {}）".format("/".join(primary_group), listed))
+    return ("primary_group の組が、指定したラウンドの観測にない（書き誤りの可能性。観測した組は「警告」を参照）",
+            "primary_group の組が見つからない")
 
 
 # ---------------------------------------------------------------------------
@@ -1546,6 +1626,10 @@ def run(args):
         raise InputError("-o と --details-csv に同じファイルが指定されています: {}".format(args.output))
 
     obs_path = args.observations or os.path.join(args.workspace, "observations.csv")
+    if not args.observations and not os.path.isfile(obs_path):
+        hint = workspace_hint(obs_path, "observations.csv")
+        if hint:
+            raise InputError("observations.csv がありません: {}。{}".format(obs_path, hint))
     rows = load_observations(obs_path)
     base_dir = os.path.dirname(os.path.abspath(obs_path))
     warnings = []

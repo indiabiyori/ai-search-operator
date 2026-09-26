@@ -13,6 +13,8 @@ ai_robots_check.py、new_round.py）が import する。Python 3.9 以上の標�
     （CSV インジェクション対策）。読むときはその ' を外す
   - 回答ファイルの先頭の欄（--- で囲んだ key: value の行）の解析
   - entities.csv と prompts.csv の読み込みと検証
+  - 率の表示「k/n（xx.x%）」（normalize_observations.py と compare_runs.py で丸め方をそろえる）
+  - ai-search/ の中で --workspace を付けずに実行したときの案内
   - -h の説明と引数の誤りの文を日本語にした ArgumentParser
 """
 import argparse
@@ -20,9 +22,11 @@ import codecs
 import csv
 import hashlib
 import io
+import os
 import re
 import sys
 import unicodedata
+from fractions import Fraction
 
 VERSION = "1.0.0"
 
@@ -68,6 +72,36 @@ def normalize_text(text):
     text = unicodedata.normalize("NFKC", text or "").casefold()
     text = _DASH_RE.sub("-", text)
     return _WS_RE.sub(" ", text)
+
+
+def format_rate(k, n):
+    # type: (int, int) -> str
+    """
+    「k/n（xx.x%）」。割合は厳密な値（分数）から小数第1位で四捨五入する（5/80 → 6.3%）。
+    float の書式は偶数丸めになり、6.25% を 6.2% と出すので使わない。分母が 0 なら「k/n（分母なし）」。
+    """
+    if not n:
+        return "{}/{}（分母なし）".format(k, n)
+    exact = Fraction(k * 1000, n)  # 割合（%）の 10 倍
+    tenths = int(abs(exact) + Fraction(1, 2))  # 0 以上なので int は切り捨て
+    sign = "-" if exact < 0 and tenths else ""
+    return "{}/{}（{}{}.{}%）".format(k, n, sign, tenths // 10, tenths % 10)
+
+
+def workspace_hint(path, name):
+    # type: (str, str) -> str
+    """
+    既定の場所（path = <workspace>/<name>）にファイルがないときの案内。今のフォルダに同じ名前のファイルが
+    あれば、ai-search/ の中で --workspace を付けずに実行した可能性が高いので、--workspace . を案内する文を返す。
+    当たらなければ空。
+    """
+    try:
+        if os.path.isfile(name) and os.path.abspath(name) != os.path.abspath(path):
+            return ("今のフォルダに {} があります。ai-search/ の中で実行しているなら --workspace . を"
+                    "付けてください".format(name))
+    except (OSError, ValueError):
+        pass
+    return ""
 
 
 def split_list(value, sep="|"):

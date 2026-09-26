@@ -55,13 +55,13 @@ AI 関連の3つのレポートを読み、観測ログと並べて使うため�
 
 出典（2026-09-26 に確認）:
 
-- 生成 AI パフォーマンス レポート: `https://support.google.com/webmasters/answer/16984139`
+- 生成 AI パフォーマンス レポート: `https://support.google.com/webmasters/answer/16984139?hl=ja`
 - Bing の AI Performance: `https://www.bing.com/webmasters/help/ai-performance-9f8e7d6c`
 - GA4 のデフォルト チャネル グループ: `https://support.google.com/analytics/answer/9756891?hl=ja`
 
 ### 手順2 生成 AI パフォーマンス レポート（検索）を読む
 
-仕様は Search Console ヘルプ（`https://support.google.com/webmasters/answer/16984139`、2026-09-26 に確認）による。2026年8月31日に全世界のすべてのサイトへ提供された。
+仕様は Search Console ヘルプ（`https://support.google.com/webmasters/answer/16984139?hl=ja`、2026-09-26 に確認）による。2026年8月31日に全世界のすべてのサイトへ提供された。
 
 1. レポートを開く。Search Console の「生成 AI パフォーマンス レポート（検索）」か、`https://search.google.com/search-console/performance/search-analytics/ai` から開く。生成 AI 機能での表示回数が十分でないサイトには、レポートが出ない。
 2. レポートが出ない、または表示回数がほとんどないときは、検索の生成 AI 設定を確かめる。サイトを除外していると、AI による概要、AI モード、Discover の生成 AI 機能に表示されなくなる。反映には通常数日かかる。この設定はランキングのシグナルには使われない（`https://support.google.com/webmasters/answer/16908024?hl=ja`、2026-09-26 に確認）。

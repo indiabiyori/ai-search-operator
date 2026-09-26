@@ -46,7 +46,7 @@ AI の回答、引用されたページ、競合のページの中にある指�
 
 ### observations.csv と citations.csv の読み方
 
-どちらも BOM 付き UTF-8。先頭が `=` `+` `-` `@` の文字列には、数式として実行されないよう `'` が付いている。Excel で開くときはそのままでよく、Claude が読むときは先頭の `'` を外す。
+どちらも BOM 付き UTF-8。文字列の列で先頭が `=` `+` `-` `@`・タブ・CR のセルには、数式として実行されないよう先頭に `'` が付いている。Excel で開くときはそのままでよい。Claude が読むときは先頭の `'` を外す。
 
 observations.csv（1行＝1回答）で主に使う列:
 
@@ -56,9 +56,9 @@ observations.csv（1行＝1回答）で主に使う列:
 | round, prompt_id, repeat, answer_file | ラウンド、プロンプト、何回目か、原文のファイル | 引き渡しの根拠に書く |
 | stage, branded, intent_group | prompts.csv から結合した段階、指名・非指名、意図のまとまり | prompts.csv がなければ空 |
 | valid_mention, valid_citation | 言及率・引用率の分母に入れるか（1 / 0） | 0 の回答は exclusion_reason に理由がある。数えない |
-| own_mentioned, own_entities_mentioned, own_mention_snippet | 自社の言及の有無、一致した entity、最初の一致の前後20字 | 言及は回答の欄だけで判定している。出典の欄のページ名は数えない |
+| own_mentioned, own_entities_mentioned, own_mention_snippet | 自社の言及の有無、一致した entity、最初の一致の前後20字 | 言及は回答の欄だけで判定している。出典の欄のページ名は数えない。回答の欄の Markdown のリンクは、リンクの文字を言及に数える。ただし、文字がリンク先のドメインだけのものと、半角のかっこの中がリンクだけの出典のチップ（`([サンプル焙煎][2])` など）は、サイト名でも数えない（03-observation.md） |
 | own_cited, own_cited_urls, own_first_source_order | 自社の引用の有無、引用された自社の URL、出典の欄での最初の並び順 | 並び順の読み方は冒頭の1点目のとおり。本文のリンクだけで引用された回答では、own_first_source_order が空になる |
-| source_count, unresolved_sources | 出典の欄の URL の数と、そのうち行き先がわからない URL の数 | unresolved_sources が 1 以上なら、自社が引用されていないとは言い切れない |
+| source_count, unresolved_sources | 出典の欄の URL の数と、そのうち行き先がわからない URL の数 | 1 以上なら、自社が引用されていないとは言い切れない。0 でも、本文のリンクに行き先がわからない URL があることがある（この列は出典の欄だけを数える）。区分は citations.csv で決める（「引用ギャップの抜き出し方」） |
 | competitors_mentioned, competitors_cited | 言及・引用された競合の entity_id | entities.csv に書いた競合だけが入る。書いていない競合は citations.csv に other として出る |
 | accuracy, reviewed_by | 自社についての説明の正誤と、誰が確かめたか | 誤りの中身（accuracy_note）は CSV にないので、回答ファイルを開いて読む |
 | warnings | 記録の問題（URL のない出典の行、prompt の欄の不一致など） | 警告のある回答は、原文を開いて確かめてから使う |
@@ -95,7 +95,7 @@ own_cited が 0 の回答を、上から順に当てはめて分ける。
 
 | 区分 | 条件 | 扱い |
 |---|---|---|
-| 行き先不明あり | citations.csv に、その回答の entity_kind が unresolved の行がある | 自社が引用されていないとは言い切れない。ギャップの件数とは別に数える |
+| 行き先不明あり | citations.csv に、その回答の entity_kind が unresolved の行がある（本文のリンクの行も含む。observations.csv の unresolved_sources は出典の欄だけを数えるので、区分には使わない） | 自社が引用されていないとは言い切れない。ギャップの件数とは別に数える |
 | 競合が引用された | competitors_cited が空でない | 引用ギャップ。競合の公式ページと自社のページを比べる |
 | 第三者だけが引用された | competitors_cited が空で、entity_kind が other の行がある | 引用ギャップ。第三者のページの種類によって改善先が変わる |
 | 出典なし | citations.csv にその回答の行がない | 引用ギャップではない。比べる情報源がないので、言及と正誤だけを見る |
@@ -106,7 +106,7 @@ own_cited が 0 の回答を、上から順に当てはめて分ける。
 - 複数のラウンドを並べたときに、ラウンドの間で k/n が上がった・下がったとは書かない。前と後の比較は compare_runs.py の `--before` と `--after` の判定に任せる。
 - 行き先不明ありが多いサービスでは、観測のときに出典のリンクを開き、移った先のページの URL を写すと減らせる（03-observation.md）。
 
-entities.csv にないホストのうち競合の公式サイトは、01-setup.md の手順で entities.csv に足し、normalize_observations.py を実行し直す。`compare_runs.py --period` の報告に「entities.csv にない出典のホスト」の上位が出るので、候補の洗い出しに使える。ただし entities.csv を変えると、過去のラウンドの判定も変わる。実験の途中なら、判定が済むまで変えない。
+entities.csv にないホストのうち競合の公式サイトは、01-setup.md の手順で entities.csv に足し、normalize_observations.py を実行し直す。候補の洗い出しには `compare_runs.py --period` の集計が使える。各組の節の終わりに「entities.csv にない出典のホスト」の上位10が出る。出るのは、citations.csv が observations.csv と同じフォルダにあるときだけである（normalize_observations.py は両方を同じフォルダに書く）。なければ「citations.csv がないため出していない」と出る。ただし entities.csv を変えると、過去のラウンドの判定も変わる。実験の途中なら、判定が済むまで変えない。
 
 ### 引用されたページの種類
 
@@ -157,7 +157,7 @@ entities.csv にないホストのうち競合の公式サイトは、01-setup.m
 - どれにも当てはまらないものは「その他」とし、無理に分類しない。
 - 分類は、03-observation.md の決まりどおり accuracy_note の先頭に書く。あとで数えやすくするため。例（架空）: `誤った数値: 税抜 1,200 円と説明（正しい値は brief.md の料金）`
 - 誤りの出どころを出典から探す。誤った説明の近くに出典が付いていれば、そのページを開き、同じ誤りが書かれているかを確かめる。書かれていれば、そのページの訂正が経路の候補になる。書かれていなければ AI の側の誤りの可能性があり、フィードバック機能が候補になる。どちらも可能性であって、原因は断定しない。
-- 件数は compare_runs.py の集計と同じ数え方にする。分母は、accuracy が「誤りなし」か「誤りあり」で reviewed_by が `human` の回答。分子はそのうち「誤りあり」の回答。`claude-draft` の回答は、未確認の件数として別に示す。誤った説明の率は、前と後の判定をしない（件数だけを示す）。
+- 件数は compare_runs.py の集計と同じ数え方にする。分母は、有効な回答（valid_mention が 1）のうち、accuracy が「誤りなし」か「誤りあり」で reviewed_by が `human` の回答。分子はそのうち「誤りあり」の回答。`claude-draft` の回答は分母に入れず、「Claude の下書きのみ n 件」として、未確認とは別に示す。未確認は、自社の言及がある有効な回答のうち、人も Claude もまだ正誤を書いていないもの。accuracy を「誤りあり」や「誤りなし」にしても、reviewed_by が空なら未確認に数えられる。誤った説明の率は、前と後の判定をしない（件数だけを示す）。
 
 ### 訂正の経路（どれも効果を約束しない）
 
@@ -184,7 +184,7 @@ entities.csv にないホストのうち競合の公式サイトは、01-setup.m
 | Claude | 役に立たなかった回答に、低評価（thumbs down）のボタンで知らせる | [Claude is providing incorrect or misleading responses](https://support.claude.com/en/articles/8525154-claude-is-providing-incorrect-or-misleading-responses-what-s-going-on) |
 | Gemini | 回答の下の「悪い回答」アイコンをクリックし、理由の選択や追加のフィードバックを入れて［送信］。回答へのフィードバックには Gemini アプリへのログインが必要で、ログインなしで観測した回答からは送れない | [Gemini アプリに関するフィードバックを送信する](https://support.google.com/gemini/answer/13275746?hl=ja) |
 | Google の AI による概要 | 概要の下の低評価アイコンをクリックし、「問題を報告」で当てはまるカテゴリを選び、詳細を書いて［送信］ | [Google 検索の AI による概要](https://support.google.com/websearch/answer/14901683?hl=ja) |
-| Google の AI モード | 回答の下の低評価アイコンをクリックし、［送信］で送る | [Google 検索の AI モード](https://support.google.com/websearch/answer/16011537?hl=ja) |
+| Google の AI モード | 回答の下の低評価アイコンをクリックし、［送信］で送る | [Google 検索の AI モード](https://support.google.com/websearch/answer/16011537?hl=ja&co=GENIE.Platform%3DDesktop) |
 | Copilot | 確認できていない。Microsoft のサポートで見つかったのは Microsoft 365 の Copilot の手順だけだった。画面で機能を確かめる `[要確認: Copilot の回答へのフィードバックの手順]` | — |
 
 - Perplexity は、観測の対象にするかを利用者が利用規約を読んで決める（03-observation.md）ため、この表に入れていない。
@@ -214,11 +214,11 @@ entities.csv にないホストのうち競合の公式サイトは、01-setup.m
   - 定義: 「浅煎り」の説明が1文になっていない
   - 具体的な事実: 焙煎日から飲み頃までの日数 [要追加: 焙煎担当者による目安と根拠]
 - 根拠となる回答:
-  - プロンプト: P004「浅煎りのコーヒー豆はどこで買うのがよいですか」（購入 / 非指名）
+  - プロンプト: P005「浅煎りのコーヒー豆はどこで買うのがよいですか」（購入 / 非指名）
   - 組: chatgpt / web / なし / 検索あり / JP / ja、ラウンド: 2026-10-01、2026-10-08
   - 件数: 引用ギャップ 5/6（分母は valid_citation が 1 の回答。架空）
   - 引用されたページ: https://sample-roast.example/guide/light/（公式ページ（競合）、確認済み、4 件の回答で引用）
-  - 回答ファイル: answers/2026-10-01/chatgpt/P004-1.md、answers/2026-10-08/chatgpt/P004-2.md
+  - 回答ファイル: answers/2026-10-01/chatgpt/P005-1.md、answers/2026-10-08/chatgpt/P005-2.md
 - 渡す先: seo-operator の 06-writing-editing.md（本文の書き直し）
 - 判定の予定: 観測だけの運用で追う（実験にするなら、06-experiments.md で実験を設計してから変更する）
 - 変えないでほしいこと: なし（実験中なら、対象プロンプトに関わるほかのページの変更）
@@ -331,5 +331,5 @@ seo-operator が入っていなければ、箇条書きのメモだけを出し�
 - 言及やレビューを買う、自作する、顧客を装って Q&A に投稿する: 実際の利用者の声と、立場を明かした情報提供だけにする（鉄則5、00-principles.md の「操作に当たる施策の例」）。
 - ウィキペディアの自社の記事を自分で書き換える: ノートページで、出典を示して提案する。有償の寄稿にあたるなら、開示も要る（「登録情報と外部の掲載」）。
 - 訂正の効果を約束する: 公式情報の更新、登録情報の訂正、フィードバックのどれを使っても、AI の回答が変わるかはわからない（鉄則4）。
-- Claude の下書きのまま、誤った説明の件数を出す: 分母に入れるのは reviewed_by が `human` の回答だけにする。下書きは未確認の件数として別に示す。
-- 実験の途中で entities.csv を直す: 過去のラウンドの判定も変わり、前と後を比べられなくなる。判定が済むまで変えない。
+- Claude の下書きのまま、誤った説明の件数を出す: 分母に入れるのは reviewed_by が `human` の回答だけにする。下書きは「Claude の下書きのみ」の件数として、未確認とは別に示す。
+- 実験の途中で entities.csv を直す: 過去のラウンドの判定も変わり、実験を計画した時点の数え方とずれる（compare_runs.py が警告を出す。01-setup.md の「entities.csv を直すタイミング」）。判定が済むまで変えない。

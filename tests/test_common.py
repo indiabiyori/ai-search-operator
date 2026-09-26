@@ -233,6 +233,45 @@ class MiscTest(unittest.TestCase):
         self.assertEqual(common.parse_id_list(""), [])
 
 
+class FormatRateTest(unittest.TestCase):
+    def test_rounds_half_up(self):
+        # 6.25% は四捨五入で 6.3%（float の書式の偶数丸めでは 6.2% になる）
+        self.assertEqual(common.format_rate(5, 80), "5/80（6.3%）")
+        self.assertEqual(common.format_rate(1, 16), "1/16（6.3%）")
+        self.assertEqual(common.format_rate(3, 16), "3/16（18.8%）")
+        self.assertEqual(common.format_rate(12, 88), "12/88（13.6%）")
+
+    def test_edges(self):
+        self.assertEqual(common.format_rate(0, 5), "0/5（0.0%）")
+        self.assertEqual(common.format_rate(5, 5), "5/5（100.0%）")
+        self.assertEqual(common.format_rate(1, 3), "1/3（33.3%）")
+        self.assertEqual(common.format_rate(2, 3), "2/3（66.7%）")
+        self.assertEqual(common.format_rate(0, 0), "0/0（分母なし）")
+
+    def test_same_as_compare_runs_for_many_values(self):
+        from decimal import Decimal, ROUND_HALF_UP
+        for n in range(1, 121):
+            for k in range(n + 1):
+                pct = (Decimal(k * 100) / Decimal(n)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+                self.assertEqual(common.format_rate(k, n), "{}/{}（{}%）".format(k, n, pct), (k, n))
+
+
+class WorkspaceHintTest(TempDirCase):
+    def test_hint_when_current_folder_has_the_file(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            self.assertEqual(common.workspace_hint(os.path.join("ai-search", "entities.csv"), "entities.csv"), "")
+            self.write_bytes("entities.csv", b"")
+            hint = common.workspace_hint(os.path.join("ai-search", "entities.csv"), "entities.csv")
+            self.assertIn("--workspace .", hint)
+            self.assertIn("entities.csv", hint)
+            # 既定の場所が今のフォルダそのもの（--workspace .）なら案内しない
+            self.assertEqual(common.workspace_hint("entities.csv", "entities.csv"), "")
+        finally:
+            os.chdir(cwd)
+
+
 class ArgumentParserTest(unittest.TestCase):
     def test_help_in_japanese(self):
         parser = common.ArgumentParser(prog="x.py", description="説明")

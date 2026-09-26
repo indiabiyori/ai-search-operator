@@ -1164,6 +1164,79 @@ class MainTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage", result.stdout)
 
+    def test_missing_observations_without_hint(self):
+        os.remove(os.path.join(self.ws, "observations.csv"))
+        result = self.run_compare("--period", "2026-10-01")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("--workspace .", result.stderr)
+
+    def test_running_inside_the_workspace_hints_workspace_dot(self):
+        # ai-search/ の中で --workspace を付けずに実行した。normalize_observations.py の実行を促さない
+        result = helpers.run_script("compare_runs", ["--period", "2026-10-01"], cwd=self.ws)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--workspace .", result.stderr)
+        self.assertNotIn("先に normalize_observations.py を実行してください", result.stderr)
+        result = helpers.run_script("compare_runs", ["--period", "2026-10-01", "--workspace", "."], cwd=self.ws)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- primary_group の書き誤り ---
+
+    def test_primary_group_typo_is_warned(self):
+        exp = self.write_experiment(primary_group="chatgpt/web/なし/検索/JP/ja")
+        result = self.run_compare("--experiment", exp)
+        out = self.assert_ok(result)
+        conclusion = section(out, "## 結論")
+        self.assertIn("確認的な判定（chatgpt / web / なし / 検索 / JP / ja、自社の引用）: 判定不能", conclusion)
+        self.assertIn("書き誤り", conclusion)
+        warnings = section(out, "## 警告")
+        self.assertIn("primary_group（chatgpt/web/なし/検索/JP/ja）", warnings)
+        self.assertIn("chatgpt/web/なし/検索あり/JP/ja", warnings)  # 観測した組の一覧
+        # 標準エラーの要約も、報告と同じく判定不能とする（「すべて探索的」としない）
+        self.assertIn("確認的な判定: 判定不能（primary_group の組が見つからない）", result.stderr)
+        self.assertNotIn("すべて探索的", result.stderr)
+
+    # --- 片方の期間にしか有効な回答がない組 ---
+
+    def rows_with_before_only_group(self):
+        """変更後のラウンドを chatgpt だけで作った（google-ai-mode の組は変更前にしかない）。"""
+        rows = standard_rows()
+        aim = dict(CHATGPT, service="google-ai-mode")
+        for pid in TARGETS + CONTROLS:
+            rows += make_rows("2026-10-01", ("2026-10-01", "2026-10-02"), pid, cited=1, mentioned=1, group=aim)
+        return rows
+
+    def test_group_only_in_one_period_is_not_comparable(self):
+        exp = self.write_experiment()
+        base = self.assert_ok(self.run_compare("--experiment", exp))
+        self.write_workspace(self.rows_with_before_only_group())
+        details = os.path.join(self.tmp, "details.csv")
+        result = self.run_compare("--experiment", exp, "--details-csv", details)
+        out = self.assert_ok(result)
+        self.assertNotIn("### google-ai-mode", out)
+        not_comparable = section(out, "## 比較できない組")
+        self.assertIn("google-ai-mode / web / なし / 検索あり / JP / ja", not_comparable)
+        self.assertIn("変更後の期間にこの組の有効な回答がない", not_comparable)
+        self.assertNotIn("google-ai-mode", section(out, "## 外したプロンプト"))
+        warnings = [line for line in section(out, "## 警告").splitlines() if "google-ai-mode" in line]
+        self.assertEqual(len(warnings), 1, warnings)
+        # 探索的な判定の内訳に数えない（google-ai-mode の組がないときと同じ）
+        def breakdown(text):
+            return [line for line in text.splitlines() if line.startswith("- 探索的な判定の内訳")]
+        self.assertEqual(breakdown(out), breakdown(base))
+        self.assertIn("確認的な判定（chatgpt / web / なし / 検索あり / JP / ja、自社の引用）: 改善シグナル", out)
+        _fields, rows = common.read_csv(details)
+        self.assertFalse([r for r in rows if r["group"].startswith("google-ai-mode")])
+
+    def test_primary_group_only_in_one_period(self):
+        self.write_workspace(self.rows_with_before_only_group())
+        exp = self.write_experiment(primary_group="google-ai-mode/web/なし/検索あり/JP/ja")
+        result = self.run_compare("--experiment", exp)
+        out = self.assert_ok(result)
+        self.assertIn("確認的な判定（google-ai-mode / web / なし / 検索あり / JP / ja、自社の引用）: 判定不能。"
+                      "変更後の期間にこの組の有効な回答がない", out)
+        self.assertNotIn("書き誤り", out)
+        self.assertIn("確認的な判定: 判定不能（変更後の期間にこの組の有効な回答がない）", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

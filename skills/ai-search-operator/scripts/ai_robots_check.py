@@ -29,6 +29,11 @@ ai_robots_check.py - AI クローラーごとに、robots.txt で許可されて
     一致するグループがなければ fallback_tokens のトークンのグループ（順に探し、最初に見つかったもの）、
     それもなければ User-agent: * のグループ、それもなければ全許可。代わりのトークンのグループに従ったときは、
     matched_group にそのトークンを出し、note に注記する。
+  - 代わりのトークンを扱うのは、特定のグループに従うと運営が説明している Applebot と Google-CloudVertexBot
+    （BUILTIN_FALLBACK_TOKENS）と、一覧の fallback_tokens の列に書いたものだけ。Amzn-SearchBot は
+    「ほかの検索ボットの許可に従う」と説明されているが、どのボットかは書かれていないので、判定は
+    User-agent: * のままにする。* で拒否され、ほかの検索用のボット（category が search か general-search）が
+    そのパスを許可されているときは、その旨を note に注記する（SEARCH_FALLBACK_TOKENS）。
   - パスの照合は最長一致で、同じ長さなら Allow を優先する。* と末尾の $ に対応する。/robots.txt は常に許可。
   - 取得の結果ごとの扱い（--url）:
       2xx: 解釈する。
@@ -111,6 +116,13 @@ BUILTIN_FALLBACK_TOKENS = {
     "google-cloudvertexbot": ("Googlebot",),
 }
 FALLBACK_COLUMN = "fallback_tokens"
+# 自分向けの記述がなければ「ほかの検索ボット」の許可に従うことがある、と運営が説明しているクローラー（小文字）。
+# どのボットに従うかは説明がないので、判定は User-agent: * のままにし、ほかの検索用のボット（category が
+# search か general-search）がそのパスを許可されていれば注記する（NOTE_SEARCH_FALLBACK）。
+#   Amzn-SearchBot: Amazon「robots.txt に Amzn-SearchBot の記述がなく、ほかの検索ボットを許可している場合は、
+#     その指示に従ってクロールする」
+SEARCH_FALLBACK_TOKENS = ("amzn-searchbot",)
+SEARCH_CATEGORIES = ("search", "general-search")
 
 CATEGORIES = {
     "general-search": "通常の検索",
@@ -138,6 +150,8 @@ NOTE_CONTROL = "クロールはしない。この指定は学習などへの利�
 NOTE_UNREACHABLE = "RFC 9309 に従って全拒否として扱った。各社の実際の扱いは異なりうる"
 NOTE_RATE_LIMITED = "RFC 9309 では全許可、Google はサーバーエラーとして扱いクロールを止める"
 NOTE_FALLBACK = "{0} 向けのグループがないため、{1} 向けのグループに従う（運営の説明）"
+NOTE_SEARCH_FALLBACK = ("{0} 向けのグループがないため User-agent: * で判定した。運営の説明では、{0} の記述がなく"
+                        "ほかの検索ボットを許可していれば、その指示に従うことがある（このパスを許可されている検索ボット: {1}）")
 DETAIL_TOO_MANY_REDIRECTS = (
     "リダイレクトが多すぎる（{} 回を超えた）。RFC 9309 2.3.1.2 では robots.txt がない（unavailable）と"
     "みなしてよく、Google も 404 として扱う".format(MAX_REDIRECTS))
@@ -944,6 +958,21 @@ def _fallback_note(rules, tokens):
     return NOTE_FALLBACK.format(tokens[0][1], dict(tokens).get(rules.agent, rules.agent))
 
 
+def _search_fallback_note(crawler_key, token, rules, allowed, search_rules, target):
+    # type: (str, str, RobotsRules, bool, list, str) -> str
+    """
+    SEARCH_FALLBACK_TOKENS のクローラーが、自分向けのグループがなく User-agent: * で拒否されたときの注記。
+    ほかの検索用のボット（自分か代わりのトークンのグループがあるもの）がそのパスを許可されていれば返す。なければ空。
+    """
+    if allowed or crawler_key not in SEARCH_FALLBACK_TOKENS or rules.agent != "*":
+        return ""
+    names = [name for key, name, other in search_rules if key != crawler_key and other.allowed_path(target)]
+    if not names:
+        return ""
+    shown = ", ".join(names[:3]) + (" など" if len(names) > 3 else "")
+    return NOTE_SEARCH_FALLBACK.format(token, shown)
+
+
 def robots_groups(state):
     # type: (dict) -> list
     """取得の結果の robots.txt を解析したグループ（state が ok でなければ空）。解析は1回だけ行い、結果を持っておく。"""
@@ -960,12 +989,19 @@ def evaluate(state, crawlers, paths):
     kind = state.get("state")
     detail = state.get("detail") or ""
     groups = robots_groups(state)
-    rows = []
+    prepared = []  # (クローラー, トークンの一覧, 適用するルール)
     for crawler in crawlers:
-        token = (crawler.get("token") or "").strip()
-        category = crawler.get("category") or ""
         tokens = crawler_tokens(crawler)
         rules = select_robots_rules(groups, [k for k, _ in tokens]) if kind == "ok" else None
+        prepared.append((crawler, tokens, rules))
+    # 自分か代わりのトークンのグループがある検索用のボット（SEARCH_FALLBACK_TOKENS の注記に使う）
+    search_rules = [(tokens[0][0], tokens[0][1], rules) for crawler, tokens, rules in prepared
+                    if rules is not None and tokens and crawler.get("category") in SEARCH_CATEGORIES
+                    and rules.agent not in (None, "*")]
+    rows = []
+    for crawler, tokens, rules in prepared:
+        token = (crawler.get("token") or "").strip()
+        category = crawler.get("category") or ""
         for path in paths:
             shown = display_path(path)
             notes = []  # type: list
@@ -976,6 +1012,9 @@ def evaluate(state, crawlers, paths):
                 verdict = VERDICT_ALLOW if allowed else VERDICT_DENY
                 group = _group_label(rules, tokens)
                 notes.append(_fallback_note(rules, tokens))
+                if tokens:
+                    notes.append(_search_fallback_note(tokens[0][0], token, rules, allowed, search_rules,
+                                                       robots_target(shown)))
                 if rule is not None:
                     matched_rule = "{}: {}".format("Allow" if rule[1] else "Disallow", rule[0])
             elif kind == "missing":

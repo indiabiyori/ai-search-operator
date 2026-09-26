@@ -14,7 +14,7 @@ AI クローラーを robots.txt で許可するか拒否するかを決める�
 | データ | 入手元（ツール → 画面 → 操作） | 必須/任意 | ないときの動き方 |
 |---|---|---|---|
 | 配信されている robots.txt | `ai_robots_check.py --url` で取得する。取得できなければ、ブラウザで `https://<ドメイン>/robots.txt` を開いて保存する | 必須 | 内容を貼ってもらい、`--file` で判定する。CMS・プラグイン・CDN が内容を書き足していることがあるので、サーバー上のファイルより配信されているものを優先する |
-| AI クローラーの一覧 | スキルのフォルダの `data/ai-crawlers.csv`（列: operator, token, category, purpose, robots_control, block_effect, source_url, checked_on） | 必須（スキルに同梱） | checked_on から3か月以上たっていれば、判定の前に手順8で再確認する |
+| AI クローラーの一覧 | スキルのフォルダの `data/ai-crawlers.csv`（列: operator, token, category, purpose, robots_control, block_effect, source_url, checked_on。任意の列 fallback_tokens は「判定の読み方」の「代わりのグループ」） | 必須（スキルに同梱） | checked_on から3か月以上たっていれば、判定の前に手順8で再確認する |
 | 判定するパス | 主要なページの URL のパス（トップ、記事、料金、会員限定のページなど） | 任意 | `/` だけで判定し、報告にそう書く |
 | 検索の生成 AI 設定 | Search Console →［設定］→［検索の生成 AI］ | Google の AI 機能を扱うなら必須 | 「未確認」と書く。未確認のまま、AI による概要に出ない原因を推測しない |
 | CDN・WAF のボット対策の設定 | 利用中の CDN・WAF の管理画面 → ボット管理、AI ボットの設定、WAF のカスタムルール、レート制限 | 任意 | 「未確認」と書く。robots.txt で許可していても、CDN で遮断されていることがある |
@@ -54,34 +54,73 @@ python3 <スキルのディレクトリ>/scripts/ai_robots_check.py --url https:
 - `-o` の出力先のフォルダがないと、「エラー: 出力を書けません」と出て終了コード 2 で止まる。`ai-search/` がまだなく、作ってよいという了承もないときは、`mkdir` をせず `-o` を外して実行し、標準出力の結果を示す。
 - 一覧は `data/ai-crawlers.csv` を読む。再確認で直した一覧を使うときは `--crawlers ai-search/ai-crawlers.csv` で差し替える。
 - 取得には `ai-search-operator/<版>` という独自の UA を使い、AI クローラーを名乗らない。CDN がこの UA にブロック画面など別の応答を返すと、判定は配信されている robots.txt を表さない。ブラウザで見た内容と違えば、保存したファイルを `--file` で判定し直す。
-- 取得する URL は http と https だけ。ユーザー名・パスワードを含む URL は取得しない。内部アドレス（プライベート IP など）に解決されるホストも取得しない。自社の検証環境を調べるときだけ `--allow-private` を付ける。
+- 取得する URL は http と https だけ。ユーザー名・パスワードを含む URL は取得しない。内部アドレス（プライベート IP など）に解決されるホストも取得せず、終了コード 2 で止まる。自社の検証環境を調べるときだけ `--allow-private` を付ける。
+- 環境変数のプロキシは使わない（接続先のアドレスを確かめられなくなるため）。プロキシを通さないと外に出られない環境では、名前解決のエラー（終了コード 2）か `全拒否（取得できず）` になる。これはサイトの状態ではないので、そのまま報告せず、robots.txt を貼ってもらって `--file` で判定する。
 - 解釈は RFC 9309 に従う。UA の照合は大文字・小文字を区別せず、同じクローラーに一致するグループが複数あれば規則を合わせる。パスは最長一致で、同じ長さなら Allow を優先する。`*` と `$` に対応する。
 - 調べるのは robots.txt だけ。CDN・WAF、メタタグ、Search Console の設定は見ないので、手順4と5を省かない。
 
 ### 判定の読み方
 
-出力の列は operator, token, category, path, verdict, matched_group, matched_rule, note。verdict は次の5つのどれかになる。
+出力の列は、Markdown（既定）と CSV で見出しが違う。並びと中身は同じ。
 
-| 判定（verdict） | 出る条件 | 読み方 |
+| Markdown の見出し | CSV の列 | 中身 |
 |---|---|---|
-| `許可` / `拒否` | robots.txt を取得して解釈できた | matched_group が適用したグループ、matched_rule が決め手のルール。matched_group が `User-agent: *` なら、そのクローラー向けのグループはない |
+| 運営 | operator | 一覧の operator |
+| トークン | token | 一覧の token |
+| 分類 | category | Markdown は日本語の名前、CSV は一覧の値（下の対応） |
+| パス | path | 判定したパス |
+| 判定 | verdict | 下の表の5つのどれか |
+| 適用したグループ | matched_group | 判定に使った robots.txt のグループ（下の「適用したグループ」） |
+| 決め手のルール | matched_rule | 判定を決めた Allow か Disallow の行。当たるルールがなければ空 |
+| 注記 | note | 代わりのグループに従ったこと、Amzn-SearchBot の行の補足（下の「代わりのグループ」）、取得の結果の説明、`user` と `control` の行の説明 |
+
+分類の名前と一覧の値の対応: 通常の検索（`general-search`）、AI 検索・回答（`search`）、学習（`training`）、ユーザー操作に伴う取得（`user`）、制御用（クロールしない）（`control`）、公開データセット（`dataset`）、その他（`other`）。
+
+| 判定 | 出る条件 | 読み方 |
+|---|---|---|
+| `許可` / `拒否` | robots.txt を取得して解釈できた（`--file` のときは常にこちら） | 適用したグループと決め手のルールを見る（下の「適用したグループ」） |
 | `全許可（robots.txt なし）` | 429 以外の 4xx（401 と 403 を含む）。リダイレクトが5回を超えたときもここに入る（下の2つ目の注） | RFC 9309 と Google は「制限なし」として扱う。WAF が robots.txt への要求を 403 で断っている場合もここに入り、robots.txt に書いた拒否はクローラーに読まれない（ページの取得を WAF が止めているかは、別に確かめる） |
-| `全拒否（取得できず）` | 5xx、タイムアウト、接続や TLS のエラー | RFC 9309 は全拒否とする。実際の扱いは運営ごとに違う（下の1つ目の注） |
+| `全拒否（取得できず）` | 5xx、タイムアウト、接続や TLS のエラー、一時的な名前解決の失敗。リダイレクトでは、Location のない 3xx、http / https 以外へのリダイレクト、解釈できないリダイレクト先、リダイレクト先の名前解決や接続の失敗 | RFC 9309 は全拒否とする。実際の扱いは運営ごとに違う（下の1つ目の注） |
 | `不定（429）` | 429 | RFC 9309 では 4xx の一つなので全許可、Google はサーバーエラーとして扱う。どちらになるかはクローラーによる |
 
 - 取得できないときの扱いは運営ごとに違う。Google は、robots.txt を取得できないと最初の12時間はサイトのクロールを止め、その後の30日は最後に取得できた版を使う（キャッシュがなければ制限なしとみなす）。Amazon は、取得できない robots.txt は存在しないものとして扱うと書いている。スクリプトは RFC 9309 に従って全拒否と出すだけなので、「各社がこのサイトを全拒否として扱う」とは読まない。どちらにしても、まずサーバーを直す。
 - リダイレクトが5回を超えたときは、`全許可（robots.txt なし）` として出し、note に「リダイレクトが多すぎる」と書く。RFC 9309 の 2.3.1.2 はこの場合を unavailable（4xx と同じ全許可）とみなしてよいとし、Google も 404 として扱うため。robots.txt に書いた拒否は読まれていないので、リダイレクトの連鎖を短くする。
 - `不定（429）` が出たら、CDN やサーバーのレート制限が robots.txt にもかかっていないかを確かめ、robots.txt を制限の対象から外す。Google は 429 をサーバーの過負荷の合図として扱う。
-- category が `user` の行には「ユーザー操作に伴う取得のため、robots.txt が適用されない場合がある」という注記が付く（「ユーザー起動のフェッチャー」）。`control` の行には、クロールはせず学習などへの利用の可否を表すトークンだという注記が付く。
-- 要約には、分類ごとに「n 件中 m 件が拒否（パス / で判定）」が出る。
-- 警告は、特定のクローラー向けのグループがあって、`User-agent: *` の Disallow がそのグループに書かれていないときに出る（例: 「GPTBot 向けのグループがあるため、User-agent: * の Disallow: /admin/ は GPTBot に適用されません」）。
+- 最初の URL のホスト名が名前解決で見つからないとき（打ち間違いなど）は、判定の表を出さず、「エラー: （ホスト名）の名前解決ができません」と出して終了コード 2 で止まる。打ち間違いを「全クローラーを拒否しているサイト」と報告しないためだ。macOS はネットワークにつながっていないときも同じエラーを返すので、ホスト名が正しければ接続の環境を疑う。
+- category が `user` の行の注記は、「ユーザー操作に伴う取得。robots.txt の扱い（運営の説明）: 」に続けて、一覧の robots_control をそのまま載せる。robots_control が空の行だけ、「ユーザー操作に伴う取得。robots.txt の扱いは運営ごとに違う（各社の公式の説明を確かめる）」になる。運営の説明は、一般に無視する・迂回することがあるとするもの（Google、Meta など）から、robots.txt で制御できるとするもの（Anthropic、Mistral AI）まで分かれる（「ユーザー起動のフェッチャー」）。判定が `拒否` でも止まるとは限らないので、注記の運営の説明を報告に写す。
+- `control` の行には「クロールはしない。この指定は学習などへの利用の可否を表す」と注記が付く。
+- 要約（「## 要約（パス ○○ で判定）」）は、`--paths` に `/` があれば `/`、なければ最初のパスで判定した行を、分類ごとに「学習: n 件中 m 件が拒否」の形で数える。拒否の件数には `全拒否（取得できず）` も入る。`不定（429）` があれば「、n 件が不定」が付く。どのトークンが拒否になっていないかは要約に出ないので、判定の表で確かめる。
+- 警告（Markdown の「## 警告」と、標準エラー出力の「警告:」）には次のものが出る。
+  - 特定のクローラー向けのグループがあって、`User-agent: *` の Disallow がそのグループに書かれていないとき（例: 「GPTBot 向けのグループがあるため、User-agent: * の Disallow: /admin/ は GPTBot に適用されません」）。Googlebot 向けのグループに従うクローラーは、「Applebot が従う Googlebot 向けのグループがあるため、User-agent: * の Disallow: /admin/ は Applebot に適用されません」の形で出る。
+  - robots.txt が 500 KiB を超えていて、先頭だけを判定したとき。
+  - robots.txt が UTF-16 で保存されているとき、UTF-8 として読めない文字があるとき。そのせいでグループが1つも読めなければ、判定の表はルールがないものとしての全許可になっている。
+  - 一覧の確認日から3か月以上たっているとき。
+
+適用したグループ（matched_group）:
+
+| 表示 | 意味 |
+|---|---|
+| `User-agent: （そのトークン）` | そのクローラー向けのグループ。一致するグループが複数あれば、規則を合わせて判定している |
+| `User-agent: Googlebot`（Applebot と Google-CloudVertexBot の行） | 自分向けのグループがないので、Googlebot 向けのグループに従った（下の「代わりのグループ」）。注記に「Applebot 向けのグループがないため、Googlebot 向けのグループに従う（運営の説明）」の形で出る |
+| `User-agent: *` | そのクローラー向けのグループも、代わりに従うグループもない |
+| `なし` | そのクローラー向けのグループも代わりのグループもなく、`User-agent: *` のグループもない。全許可になる |
+| 空 | robots.txt の記述を判定していない（`全許可（robots.txt なし）` など、取得の結果で判定が決まった行） |
+
+代わりのグループ: 自分向けのグループがないとき、Applebot と Google-CloudVertexBot は Googlebot 向けのグループに従う。Apple は、Applebot の指定がなく Googlebot の指定があれば Googlebot の指定に従うと説明し、Google は Google-CloudVertexBot の robots.txt 用のトークンを Google-CloudVertexBot と Googlebot の2つとしているためだ。
+
+- どのトークンに従うかは、一覧に任意の列 fallback_tokens（`|` 区切り。具体的なものから順）があればその値を使い、列がなければスクリプトに内蔵の表（Applebot と Google-CloudVertexBot に Googlebot）を使う。
+- 列を足すと内蔵の表は使われず、列が空の行はほかのトークンに従わない。再確認で直した一覧に列を足すときは、Applebot と Google-CloudVertexBot の行に `Googlebot` と書く。
+- 代わりのグループで判定するのは、fallback_tokens の列がなければ Applebot と Google-CloudVertexBot、列があれば列に値を書いた行だけ。Amzn-SearchBot も、自分向けの指定がなく、ほかの検索用のボットを許可していればその指定に従うと Amazon は説明している。ただし、どのボットに従うかは書かれていないので、スクリプトは `User-agent: *` のグループで判定する。
+- その判定が `拒否` で、ほかの検索用のボットがそのパスを許可されていれば、Amzn-SearchBot の行の注記に「Amzn-SearchBot 向けのグループがないため User-agent: * で判定した」と Amazon の説明が出る。末尾には、そのパスを許可されている検索用のボットの名前が3つまで並ぶ（4つ以上なら「など」が付く）。名前が挙がるのは、分類が「AI 検索・回答」か「通常の検索」で、自分向けか代わりのグループがあるボットだけ。この注記が出た行は、表の判定と実際の扱いが違いうる。
 
 出典（2026-09-26 に確認）:
 
-- RFC 9309 の 2.2.1 と 2.3.1: `https://www.rfc-editor.org/rfc/rfc9309`
+- RFC 9309 の 2.2.1 と 2.3.1: `https://www.rfc-editor.org/rfc/rfc9309.html`
 - Google の robots.txt の仕様（英語版の最終更新日 2026-08-31）: `https://developers.google.com/crawling/docs/robots-txt/robots-txt-spec`
 - Google の HTTP ステータス コードの扱い（英語版の最終更新日 2026-02-04）: `https://developers.google.com/crawling/docs/troubleshooting/http-status-codes`
 - Amazon: `https://developer.amazon.com/amazonbot`
+- Apple（Applebot）: `https://support.apple.com/en-us/119829`
+- Google の共通クローラー（Google-CloudVertexBot）: `https://developers.google.com/crawling/docs/crawlers-fetchers/google-common-crawlers`
 
 ### robots.txt ではない制御（2026-09-26 に確認）
 
@@ -100,9 +139,9 @@ Google の AI による概要と AI モードは Googlebot が集めた検索の
 出典（2026-09-26 に確認）:
 
 - 検索の生成 AI 設定: `https://support.google.com/webmasters/answer/16908024?hl=ja`
-- 最適化ガイド: `https://developers.google.com/search/docs/fundamentals/ai-optimization-guide`
-- AI 機能とウェブサイト: `https://developers.google.com/search/docs/appearance/ai-features`
-- robots メタタグ（英語版の最終更新日 2026-03-24、日本語版は 2026-03-25）: `https://developers.google.com/search/docs/crawling-indexing/robots-meta-tag`
+- 最適化ガイド: `https://developers.google.com/search/docs/fundamentals/ai-optimization-guide?hl=ja`
+- AI 機能とウェブサイト: `https://developers.google.com/search/docs/appearance/ai-features?hl=ja`
+- robots メタタグ（英語版の最終更新日 2026-03-24、日本語版は 2026-03-25）: `https://developers.google.com/search/docs/crawling-indexing/robots-meta-tag?hl=ja`
 
 #### Bing（Copilot）
 
@@ -135,7 +174,7 @@ Google-Extended はクロールをしない制御用のトークンで、拒否�
 - 学習への利用を減らしたい: Google-Extended を拒否する。検索の生成 AI 機能のモデルへの効果は `[要確認: Google-Extended が検索の生成 AI 機能のモデルの学習に効くか（公式資料の記述が一致していない）]` と書き、「拒否すれば検索の AI の学習に使われない」と断定しない。
 - 両方を組み合わせてもよい（方針 B と D）。
 
-出典: `https://developers.google.com/crawling/docs/crawlers-fetchers/google-common-crawlers`、`https://support.google.com/webmasters/answer/16908024?hl=ja`、`https://developers.google.com/search/docs/appearance/ai-features`。
+出典: `https://developers.google.com/crawling/docs/crawlers-fetchers/google-common-crawlers`、`https://support.google.com/webmasters/answer/16908024?hl=ja`、`https://developers.google.com/search/docs/appearance/ai-features?hl=ja`。
 
 ### ユーザー起動のフェッチャー（2026-09-26 に確認）
 
@@ -185,7 +224,7 @@ CDN で IP ごと遮断する方法にも注意がいる。クローラーが ro
 
 出典（2026-09-26 に確認）:
 
-- Google の AI 機能とウェブサイト: `https://developers.google.com/search/docs/appearance/ai-features`
+- Google の AI 機能とウェブサイト: `https://developers.google.com/search/docs/appearance/ai-features?hl=ja`
 - Google の URL 検査: `https://support.google.com/webmasters/answer/9012289?hl=ja`
 - Google の共通クローラー（Google-InspectionTool）: `https://developers.google.com/crawling/docs/crawlers-fetchers/google-common-crawlers`
 - Cloudflare: `https://developers.cloudflare.com/bots/additional-configurations/block-ai-bots/`、`https://developers.cloudflare.com/bots/additional-configurations/managed-robots-txt/`、`https://developers.cloudflare.com/bots/concepts/bot/verified-bots/`、`https://developers.cloudflare.com/ai-crawl-control/features/manage-ai-crawlers/`
@@ -219,7 +258,7 @@ CDN で IP ごと遮断する方法にも注意がいる。クローラーが ro
 - OAI-SearchBot を拒否したサイトは ChatGPT の検索回答に表示されなくなるが、ナビゲーション用のリンクとしては表示されうる（OpenAI のクローラー一覧 `https://developers.openai.com/api/docs/bots`、2026-09-26 に確認）。
 - Google の AI 機能は Googlebot のインデックスを使うので、robots.txt では止まらない。方針 D を使う。
 - Copilot には専用のトークンがない。Bing のメタタグを使う（「Bing（Copilot）」）。
-- `user` の行は robots.txt が適用されない場合がある（「ユーザー起動のフェッチャー」）。
+- `user` の行の多くは robots.txt が適用されない場合がある。Anthropic と Mistral AI は robots.txt で制御できると説明している（「ユーザー起動のフェッチャー」）。判定の表の注記に、行ごとの運営の説明が出る。
 
 そのほかの分類:
 
@@ -234,11 +273,12 @@ CDN で IP ごと遮断する方法にも注意がいる。クローラーが ro
 
 ### robots.txt の記述例（方針 B）
 
-前半のグループが学習用のクローラーの拒否、`User-agent: *` のグループは既存のルールの例。ここに挙げたのは主なトークンだけなので、実際には `data/ai-crawlers.csv` の category が `training`・`control`・`dataset` の行から選ぶ。Amazonbot のように用途が混ざる行は、purpose を読んでから入れるかを決める。
+前半のグループが学習用のクローラーの拒否、`User-agent: *` のグループは既存のルールの例。前半には、同梱の一覧（確認日 2026-09-26）で category が `training`・`control`・`dataset` の行のうち、学習以外の用途を兼ねる meta-externalagent と Amazonbot を除いたトークンを並べた。実際には `data/ai-crawlers.csv` の最新の行から選ぶ。
 
 ```text
 User-agent: GPTBot
 User-agent: ClaudeBot
+User-agent: MistralAI-Training
 User-agent: Google-Extended
 User-agent: Applebot-Extended
 User-agent: CCBot
@@ -248,17 +288,19 @@ User-agent: *
 Disallow: /admin/
 ```
 
+この例を同梱の一覧で `--file` を使って判定すると、要約は「学習: 5 件中 3 件が拒否」になる。制御用（2件）と公開データセット（1件）はすべて拒否になる。学習で許可のまま残る meta-externalagent と Amazonbot は、行ごとに purpose と block_effect を読んで決め（「方針 B を選ぶときの注意」）、拒否するなら前半のグループに User-agent の行を足す。要約には残ったトークンの名前が出ないので、判定の表で分類が「学習」、判定が `許可` の行を見る。
+
 書くときの落とし穴:
 
 - 特定のクローラー向けのグループを作ると、そのクローラーは `User-agent: *` のグループを読まなくなる。RFC 9309 は「一致するグループがないときだけ `*` のグループに従う」とし、Google も特定のグループと `*` のグループは合わせないと書いている。検索用のクローラー向けにグループを足すときは、`*` に書いている Disallow（管理画面など）もそのグループに書く。`ai_robots_check.py` はこの抜けを警告する。
-- 指定のないクローラーが、ほかのクローラー向けの指定に従うことがある。Applebot は、Applebot の指定がなく Googlebot の指定があれば Googlebot の指定に従う。Amzn-SearchBot も、指定がなくほかの検索用のボットを許可していれば、その指定に従う。Googlebot 向けに書いた規則が Apple や Amazon にも効くことを前提に書く。
+- 指定のないクローラーが、ほかのクローラー向けの指定に従うことがある。Applebot は、Applebot の指定がなく Googlebot の指定があれば Googlebot の指定に従う。Amzn-SearchBot も、指定がなくほかの検索用のボットを許可していれば、その指定に従う。Googlebot 向けに書いた規則が Apple や Amazon にも効くことを前提に書く。`ai_robots_check.py` は Applebot（と Google-CloudVertexBot）のこの扱いを判定に入れている。Amzn-SearchBot は `User-agent: *` のグループで判定し、ほかの検索用のボットがそのパスを許可されていれば注記で知らせる（「判定の読み方」の「代わりのグループ」）。
 - トークンは `data/ai-crawlers.csv` から写す。公式ページの表から写すと、ハイフンが別の文字になっていることがある（Perplexity のクローラー一覧の表の見出しでは、Perplexity-User のハイフンが U+2011 だった。2026-09-26 に確認）。
 - 変更が反映されるまでの時間は運営ごとに違う。Google は robots.txt を通常24時間までキャッシュする。OpenAI は OAI-SearchBot の変更の反映に約24時間、Amazon は約24時間、DuckDuckGo は DuckAssistBot で72時間と書いている。Bing は robots.txt を少なくとも数時間キャッシュする。判定の直後に効果を確かめようとしない。
 - 変更後は `ai_robots_check.py` を再実行して判定を保存し、変更日と理由を記録する。
 
 出典（2026-09-26 に確認）:
 
-- RFC 9309: `https://www.rfc-editor.org/rfc/rfc9309`
+- RFC 9309: `https://www.rfc-editor.org/rfc/rfc9309.html`
 - Google の robots.txt の仕様: `https://developers.google.com/crawling/docs/robots-txt/robots-txt-spec`
 - Apple: `https://support.apple.com/en-us/119829`
 - Amazon: `https://developer.amazon.com/amazonbot`
@@ -280,7 +322,7 @@ OpenAI のクローラー一覧も、`platform.openai.com/docs/bots` から `dev
 1. `data/ai-crawlers.csv` の各行の source_url を開き、purpose、robots_control、block_effect が今も正しいかを確かめる。更新日が表示されている資料は、その日付も控える。
 2. 各社の資料に新しいトークンが載っていないかを見る。Google はクローラーの資料の変更履歴（`https://developers.google.com/crawling/docs/changelog`）を公開している。Anthropic の記事の末尾には、大きな変更の通知を受け取る登録フォームがある。
 3. この手順書の「robots.txt ではない制御」「Google-Extended の記述の食い違い」「CDN・WAF の確認」に書いた仕様も、出典の URL で確かめる。
-4. 変わっていた行は、スキルのフォルダの一覧を直接書き換えず、`ai-search/ai-crawlers.csv` にコピーして直し、`--crawlers` で使う（スキルのフォルダは読み取り専用の環境があるため）。`ai-search/` がまだなければ、作ってよいかを先にユーザーに確かめる。変更前と変更後、出典の URL、確認日を報告に書く。
+4. 変わっていた行は、スキルのフォルダの一覧を直接書き換えず、`ai-search/ai-crawlers.csv` にコピーして直し、`--crawlers` で使う（スキルのフォルダは読み取り専用の環境があるため）。`ai-search/` がまだなければ、作ってよいかを先にユーザーに確かめる。任意の列 fallback_tokens を足すときは、Applebot と Google-CloudVertexBot の行に `Googlebot` と書く（列があるとスクリプトに内蔵の表が使われないため。「判定の読み方」の「代わりのグループ」）。変更前と変更後、出典の URL、確認日を報告に書く。
 5. 確認できなかった行は推測で埋めず、報告に `[要確認: ○○（確認できなかった理由）]` と書く。
 
 出典: Google の変更履歴（`https://developers.google.com/crawling/docs/changelog`）、OpenAI（`https://developers.openai.com/api/docs/bots`）、Anthropic（上の出典と同じ記事）。
@@ -309,7 +351,7 @@ AI クローラーの UA を名乗ったリクエストで試す方法は使わ�
 data/ai-crawlers.csv の各行を、source_url の公式資料で再確認してください。
 - 用途（purpose）、robots.txt の扱い（robots_control）、拒否したときの影響（block_effect）が今も正しいか
 - 公式資料に新しく載ったトークンがないか
-変わっていた行は、変更前・変更後・出典の URL・確認日を表にしてください。確認できなかった行は推測で埋めず、[要確認: ○○] としてください。直した一覧は ai-search/ai-crawlers.csv に書き、ai_robots_check.py の --crawlers で使います。
+変わっていた行は、変更前・変更後・出典の URL・確認日を表にしてください。確認できなかった行は推測で埋めず、[要確認: ○○] としてください。直した一覧は ai-search/ai-crawlers.csv に書き、ai_robots_check.py の --crawlers で使います。fallback_tokens の列を足す場合は、Applebot と Google-CloudVertexBot の行に Googlebot と書いてください。
 ```
 
 ## 5. 出力フォーマット
@@ -320,7 +362,7 @@ data/ai-crawlers.csv の各行を、source_url の公式資料で再確認して
 - 意図と違う設定: {なし / 例（架空）: CDN の一括遮断で OAI-SearchBot に 403 を返している}
 - 決めること: {未決定の方針 / なし}
 
-### robots.txt の判定（パス / で判定。一覧の確認日 {YYYY-MM-DD}）
+### robots.txt の判定（パス {要約の見出しのパス。ふつうは /} で判定。一覧の確認日 {YYYY-MM-DD}）
 - 取得の結果: {許可・拒否を判定できた / 全許可（robots.txt なし）/ 全拒否（取得できず）/ 不定（429）}（ステータス {コード}）
 - 警告: {User-agent: * の Disallow が適用されないクローラー / なし}
 
@@ -330,7 +372,7 @@ data/ai-crawlers.csv の各行を、source_url の公式資料で再確認して
 | 制御用（control） | | | クロールはしない |
 | 公開データセット（dataset） | | | |
 | AI 検索・回答（search） | | | |
-| ユーザー操作に伴う取得（user） | | | robots.txt が適用されない場合がある |
+| ユーザー操作に伴う取得（user） | | | 運営ごとに違う（注記の列の運営の説明を写す） |
 | 通常の検索（general-search） | | | |
 | その他（other） | | | 方針 A〜D の対象外。行ごとに決める |
 
@@ -358,7 +400,7 @@ data/ai-crawlers.csv の各行を、source_url の公式資料で再確認して
 - Google-Extended や Googlebot の拒否で AI による概要を止めようとする: Google-Extended は Google 検索への掲載に影響しないので外れない。Googlebot を拒否すると通常の検索結果からも消える。外すには検索の生成 AI 設定を使う。ページ単位なら `nosnippet` で AI 機能の直接の入力から外せるが、通常の検索結果のスニペットも消える。`max-snippet` と `data-nosnippet` は量や範囲を制限するだけで、ページを外すことにはならない。
 - Google-Extended を拒否すれば検索の AI の学習に使われない、と断定する: 公式資料の書き方がそろっていない。`[要確認: ○○]` を付けて、確認できている範囲だけを書く。
 - 特定のクローラーのグループを追加して、既存の制限が外れる: そのクローラーは `User-agent: *` のグループを読まなくなる。必要な Disallow を追加したグループにも書き、`ai_robots_check.py` の警告で確かめる。
-- Googlebot 向けのグループが Applebot にも効くことを見落とす: Applebot は、自分の指定がなければ Googlebot の指定に従う。Apple だけ扱いを変えたいなら Applebot のグループを書く。
+- Googlebot 向けのグループが Applebot にも効くことを見落とす: Applebot は、自分の指定がなければ Googlebot の指定に従う。判定の表では、適用したグループが `User-agent: Googlebot` になり、注記にそう出る。Apple だけ扱いを変えたいなら Applebot のグループを書く。
 - ユーザー起動のフェッチャーを robots.txt で止めたつもりになる: Google、Meta などは一般に無視する・迂回することがあると説明している。判定の note 列を読み、止まる保証がないことを報告に書く。
 - AI クローラーの UA を名乗って CDN の設定を確かめる: CDN は IP や署名で本物を見分けるので、結果が本物の扱いを表さない。管理画面とログ（送信元 IP で確かめたもの）で確かめる。
 - robots.txt に 403 や 429 を返しているのに気づかない: 403 は RFC 9309 と Google では「robots.txt なし」の全許可になり、robots.txt に書いた拒否が読まれない。429 は扱いがクローラーによって分かれる。robots.txt は、ボット対策とレート制限の対象から外す。

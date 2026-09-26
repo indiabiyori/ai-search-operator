@@ -346,6 +346,21 @@ class PlanRoundTest(WorkspaceCase):
             with self.assertRaises(new_round.InputError, msg=repr(kwargs)):
                 new_round.plan_round(prompts, "2026-10-01", ["chatgpt"], 1, None, **kwargs)
 
+    def test_mode_option(self):
+        prompts = self.load_prompts()
+        for mode in ("検索あり", "検索あり・Think", "GPT-5 Thinking", "C#"):
+            plan = new_round.plan_round(prompts, "2026-10-01", ["chatgpt"], 1, ["P001"], mode=mode)
+            self.assertEqual(plan[0][1]["mode"], mode)
+        plan = new_round.plan_round(prompts, "2026-10-01", ["chatgpt"], 1, ["P001"], mode="  検索あり ")
+        self.assertEqual(plan[0][1]["mode"], "検索あり")
+
+    def test_mode_rejects_slash_hash_and_control_characters(self):
+        prompts = self.load_prompts()
+        for mode in ("GPT-5 Thinking/検索あり", "検索あり #メモ", "#検索あり", "検索\x00あり", "検索\nあり"):
+            with self.assertRaises(new_round.InputError, msg=repr(mode)) as ctx:
+                new_round.plan_round(prompts, "2026-10-01", ["chatgpt"], 1, None, mode=mode)
+            self.assertIn("--mode", str(ctx.exception))
+
 
 class WriteRoundTest(WorkspaceCase):
     """ファイルを書くときの OS のエラーを、traceback ではなく入力エラー（終了コード 2）にする。"""
@@ -641,6 +656,48 @@ class MainTest(WorkspaceCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(guidance, proc.stdout)
         self.assertNotIn("observed_at に時刻", proc.stdout)
+
+    def test_mode_option_reaches_files(self):
+        code, err = self.main_in_process(self.ARGS + ["--mode", "検索あり"])
+        self.assertEqual(code, 0, err)
+        for rel in self.list_answers():
+            self.assertEqual(self.read_meta(rel)["mode"], "検索あり", rel)
+        proc = helpers.run_script("new_round", ["--help"], cwd=self.tmp)
+        self.assertIn("--mode", proc.stdout)
+
+    def test_bad_mode_exit_2_without_files(self):
+        proc = helpers.run_script("new_round", self.ARGS + ["--mode", "GPT-5 Thinking/検索あり"], cwd=self.tmp)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("--mode", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "answers")))
+
+    def test_existing_files_with_other_mode_warn(self):
+        base = ["--round", "2026-10-01", "--services", "chatgpt", "--repeats", "1", "--prompts", "P001"]
+        code, err = self.main_in_process(base)
+        self.assertEqual(code, 0, err)
+        # --mode を付け忘れて作ったあとで、--mode を付けて作り直そうとした（既存のファイルは上書きしない）
+        code, err = self.main_in_process(base + ["--mode", "検索あり"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("作らなかったファイル: 1 件", err)
+        self.assertIn("mode=空（今回の指定は 検索あり）", err)
+        # --mode を付けなければ、mode の違いは知らせない（記入済みの mode と比べない）
+        code, err = self.main_in_process(base)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("mode=", err)
+
+    def test_running_inside_the_workspace_hints_workspace_dot(self):
+        proc = helpers.run_script("new_round", self.ARGS, cwd=self.ws)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("--workspace .", proc.stderr)
+        self.assertNotIn("先に prompts.csv を作ってください", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "answers")))
+
+    def test_missing_prompts_csv_without_hint(self):
+        os.remove(os.path.join(self.ws, "prompts.csv"))
+        proc = helpers.run_script("new_round", self.ARGS, cwd=self.tmp)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertNotIn("--workspace .", proc.stderr)
 
     def test_argument_errors_in_japanese(self):
         cases = [

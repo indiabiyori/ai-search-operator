@@ -514,6 +514,60 @@ class FallbackTokenTest(TempDirCase):
         self.assertEqual(rows["GPTBot"]["verdict"], "拒否")
 
 
+class SearchBotFallbackNoteTest(TempDirCase):
+    """
+    Amazon は Amzn-SearchBot について「robots.txt に Amzn-SearchBot の記述がなく、ほかの検索ボットを許可している
+    場合は、その指示に従う」と説明している。どのボットに従うかは説明がないので、判定は User-agent: * のまま
+    にして、注記で知らせる。
+    """
+    CRAWLERS = (HEADER + "Google,Googlebot,general-search,,,,,2026-09-26\n"
+                         "Amazon,Amzn-SearchBot,search,,,,,2026-09-26\n"
+                         "OpenAI,GPTBot,training,,,,,2026-09-26\n")
+    GB_ONLY = "User-agent: Googlebot\nAllow: /\n\nUser-agent: *\nDisallow: /\n"
+
+    def load(self, text=None):
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            return robots.load_crawlers(self.write("c.csv", text or self.CRAWLERS))
+
+    def test_note_when_another_search_bot_is_allowed(self):
+        rows = robots.evaluate(ok_state(self.GB_ONLY), self.load(), ["/"])
+        row = by_token(rows, "Amzn-SearchBot")
+        self.assertEqual((row["verdict"], row["matched_group"]), ("拒否", "User-agent: *"))
+        self.assertIn("ほかの検索ボットを許可していれば、その指示に従うことがある", row["note"])
+        self.assertIn("Googlebot", row["note"])
+        self.assertEqual(by_token(rows, "GPTBot")["note"], "")
+
+    def test_no_note_with_own_group_or_without_allowed_search_bot(self):
+        crawlers = self.load()
+        text = "User-agent: Amzn-SearchBot\nDisallow: /\n\n" + self.GB_ONLY
+        row = by_token(robots.evaluate(ok_state(text), crawlers, ["/"]), "Amzn-SearchBot")
+        self.assertEqual((row["verdict"], row["note"]), ("拒否", ""))
+        row = by_token(robots.evaluate(ok_state("User-agent: *\nDisallow: /\n"), crawlers, ["/"]), "Amzn-SearchBot")
+        self.assertEqual((row["verdict"], row["note"]), ("拒否", ""))
+        text = "User-agent: Googlebot\nDisallow: /\n\nUser-agent: *\nDisallow: /\n"
+        row = by_token(robots.evaluate(ok_state(text), crawlers, ["/"]), "Amzn-SearchBot")
+        self.assertEqual(row["note"], "")
+        # 許可されているのが検索用でないボット（学習用）だけなら注記しない
+        text = "User-agent: GPTBot\nAllow: /\n\nUser-agent: *\nDisallow: /\n"
+        row = by_token(robots.evaluate(ok_state(text), crawlers, ["/"]), "Amzn-SearchBot")
+        self.assertEqual(row["note"], "")
+
+    def test_note_is_per_path(self):
+        text = "User-agent: Googlebot\nDisallow: /private/\n\nUser-agent: *\nDisallow: /\n"
+        rows = robots.evaluate(ok_state(text), self.load(), ["/", "/private/"])
+        self.assertIn("Googlebot", by_token(rows, "Amzn-SearchBot", "/")["note"])
+        self.assertEqual(by_token(rows, "Amzn-SearchBot", "/private/")["note"], "")
+
+    def test_bundled_list_cli(self):
+        path = self.write("gb.txt", self.GB_ONLY)
+        result = helpers.run_script("ai_robots_check", ["--file", path, "--format", "csv"], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {r["token"]: r for r in csv.DictReader(io.StringIO(result.stdout))}
+        self.assertEqual(rows["Amzn-SearchBot"]["verdict"], "拒否")
+        self.assertIn("ほかの検索ボット", rows["Amzn-SearchBot"]["note"])
+        self.assertIn("Googlebot", rows["Amzn-SearchBot"]["note"])
+
+
 class StarInheritanceTest(unittest.TestCase):
     def warnings(self, text, crawlers=None):
         return robots.star_inheritance_warnings(robots.parse_robots(text), crawlers or [crawler("GPTBot")])

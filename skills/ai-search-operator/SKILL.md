@@ -20,11 +20,11 @@ description: "日本語サイト・ブランドが AI 検索でどう扱われ�
 
 | 依頼の例 | 読むファイル | 併用するもの |
 |---|---|---|
-| 初めて使う、自社・競合・表記ゆれの整理 | [references/01-setup.md](references/01-setup.md) | templates/brief.md, templates/entities.csv |
+| 初めて使う、自社・競合・表記ゆれの整理 | [references/01-setup.md](references/01-setup.md) | templates/brief.md, templates/entities.csv, templates/prompts.csv |
 | 何を AI に尋ねて調べるか決めたい | [references/02-prompt-set.md](references/02-prompt-set.md) | templates/prompts.csv |
 | AI の回答を記録したい、観測の条件 | [references/03-observation.md](references/03-observation.md) | scripts/new_round.py, scripts/normalize_observations.py |
 | 現状の言及率・引用率を知りたい | [references/03-observation.md](references/03-observation.md) | scripts/compare_runs.py --period |
-| 競合ばかり引用される、AI が自社を間違って説明する | [references/04-citation-gap.md](references/04-citation-gap.md) | ai-search/citations.csv |
+| 競合ばかり引用される、AI が自社を間違って説明する | [references/04-citation-gap.md](references/04-citation-gap.md) | ai-search/observations.csv, ai-search/citations.csv, scripts/normalize_observations.py |
 | GPTBot などを拒否すべきか、robots.txt の確認 | [references/05-crawler-policy.md](references/05-crawler-policy.md) | scripts/ai_robots_check.py, data/ai-crawlers.csv |
 | 施策の効果を確かめたい | [references/06-experiments.md](references/06-experiments.md) | scripts/compare_runs.py, templates/experiment.md |
 | Search Console・Bing・GA4 の AI 関連のデータ | [references/07-platform-reports.md](references/07-platform-reports.md) | —（画面とエクスポートを手で読む） |
@@ -83,9 +83,9 @@ Search Console や Bing のレポートが出ていないサイトでも、観�
 
 | 必要なデータ | 入手元と操作 | 主に使う場面 |
 |---|---|---|
-| AI の回答の原文と出典（観測ログ） | ユーザーが AI サービスの画面で、毎回新しい会話でプロンプトを尋ね、回答と出典を回答ファイル（`ai-search/answers/<ラウンド>/<サービス>/<プロンプトID>-<回数>.md`）に貼る。ひな形は new_round.py で作る。コピーで出典が消えるサービスでは、出典の URL を画面から1つずつ写す | 03, 04, 06 |
+| AI の回答の原文と出典（回答ファイル） | ユーザーが AI サービスの画面で、毎回新しい会話でプロンプトを尋ね、回答と出典を回答ファイル（`ai-search/answers/<ラウンド>/<サービス>/<プロンプトID>-<回数>.md`）に貼る。ひな形は new_round.py で作る。コピーで出典が消えるサービスでは、出典の URL を画面から1つずつ写す | 03, 04, 06 |
 | 自社・競合の表記ゆれとドメイン | `ai-search/entities.csv`（作り方は 01-setup.md） | 03, 04 |
-| 正しい事実の一覧 | 公式サイト・会社概要・料金表などから、出典と確認日を付けて `ai-search/brief.md` に書く | 01, 04 |
+| 正しい事実の一覧 | 公式サイト・会社概要・料金表などから、出典と確認日を付けて `ai-search/brief.md` に書く | 01, 03, 04 |
 | プロンプトの候補 | Search Console の検索パフォーマンスのクエリのエクスポート、問い合わせや営業に届く質問、Bing Webmaster Tools の AI Performance のグラウンディング クエリ | 02 |
 | robots.txt | ブラウザで `https://<ドメイン>/robots.txt` を開いて貼ってもらう。または `ai_robots_check.py --url` で取得する | 05 |
 | CDN・WAF のボット対策の設定 | 利用中の CDN・WAF の管理画面とログ | 05 |
@@ -96,7 +96,7 @@ Search Console や Bing のレポートが出ていないサイトでも、観�
 画面の名前と仕様は、2026-09-26 に次の公式資料で確かめた。変わることがあるので、手順を案内する前に 07-platform-reports.md と公式資料で確かめ直す。
 
 - Search Console ヘルプ「生成 AI パフォーマンス レポート（検索）」: https://support.google.com/webmasters/answer/16984139?hl=ja
-- Bing Webmaster Blog「Introducing AI Performance in Bing Webmaster Tools Public Preview」（2026-02-10）: https://blogs.bing.com/webmaster/February-2026/Introducing-AI-Performance-in-Bing-Webmaster-Tools-Public-Preview
+- Bing Webmaster Blog「Introducing AI Performance in Bing Webmaster Tools Public Preview」（2026-02-10）: https://blogs.bing.com/webmaster/2026/2/Introducing-AI-Performance-in-Bing-Webmaster-Tools-Public-Preview/
 - アナリティクス ヘルプ「デフォルト チャネル グループ」: https://support.google.com/analytics/answer/9756891?hl=ja
 
 ## 初回セットアップ
@@ -125,7 +125,7 @@ python3 <スキルのディレクトリ>/scripts/new_round.py --help
 
 | スクリプト | できること | 例 |
 |---|---|---|
-| new_round.py | 観測ラウンドの回答ファイルのひな形を作る。既存のファイルは上書きしない | `python3 <スキルのディレクトリ>/scripts/new_round.py --round 2026-10-01 --services chatgpt,google-ai-mode --repeats 3` |
+| new_round.py | 観測ラウンドの回答ファイルのひな形を作る。既存のファイルは上書きしない。`--mode` の値は全ファイルの mode の欄に入る（付けなければ空のまま） | `python3 <スキルのディレクトリ>/scripts/new_round.py --round 2026-10-01 --services chatgpt,google-ai-mode --repeats 3 --mode 検索あり` |
 | normalize_observations.py | 回答ファイルを読み、observations.csv・citations.csv・observations.run.json を作り直す | `python3 <スキルのディレクトリ>/scripts/normalize_observations.py` |
 | compare_runs.py | ラウンドの集計（`--period`）、変更の前後の比較（`--before` と `--after`）、実験の記録に沿った判定（`--experiment`） | `python3 <スキルのディレクトリ>/scripts/compare_runs.py --period 2026-10-01,2026-10-08` |
 | ai_robots_check.py | robots.txt が AI クローラーごとに許可・拒否のどちらかを、RFC 9309 に沿って判定する | `python3 <スキルのディレクトリ>/scripts/ai_robots_check.py --url https://kakuu-coffee.example --paths /,/pricing/` |
@@ -133,7 +133,7 @@ python3 <スキルのディレクトリ>/scripts/new_round.py --help
 例のラウンド名とドメイン（kakuu-coffee.example）は架空のもの。
 
 - 終了コードは、0 が成功、2 が入力や引数の誤り、1 が想定外のエラー。処理の要約と警告は標準エラー出力に出るので、警告も読んでユーザーに伝える。
-- 出力の CSV は BOM 付き UTF-8 で、Excel でそのまま開ける。文字列の列で先頭が `=` `+` `-` `@`・タブ・CR のセルには、数式として実行されないよう先頭に `'` が付く。Claude が CSV を直接読んで分析するときは、この `'` を外して読む。
+- ファイルに書く CSV は BOM 付き UTF-8 で、Excel でそのまま開ける。文字列の列で先頭が `=` `+` `-` `@`・タブ・CR のセルには、数式として実行されないよう先頭に `'` が付く。Claude が CSV を直接読んで分析するときは、この `'` を外して読む。ai_robots_check.py の `--format csv` を `-o` なしで標準出力に出すときは、BOM も `'` も付かない（`-o` でファイルに書くと付く）。
 - observations.csv と citations.csv は派生物で、normalize_observations.py を実行するたびに作り直される。手で直すのは回答ファイルと entities.csv・prompts.csv だけにする。
-- Claude Code のクラウドセッションや Cowork では、ネットワークの制限で `ai_robots_check.py --url` が対象サイトに届かないことがある。その場合は robots.txt の内容を貼ってもらい、ファイルに保存して `--file` で判定する。
+- Claude Code のクラウドセッションや Cowork では、ネットワークの制限で `ai_robots_check.py --url` が対象サイトに届かないことがある。このスクリプトは環境変数のプロキシを使わないので、届かないときは名前解決のエラー（終了コード 2）か、全クローラーが `全拒否（取得できず）` の表になる。どちらもサイトの状態ではないので、そのまま報告しない。robots.txt の内容を貼ってもらい、ファイルに保存して `--file` で判定する。
 - Web 検索や Web ページ取得のツールが使える環境では、各社の公式資料の確認に使ってよい。ただし、その結果を AI サービスの観測として記録しない。

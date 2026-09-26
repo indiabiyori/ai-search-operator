@@ -7,7 +7,7 @@ normalize_observations.py - 回答ファイルを observations.csv と citations
   判定は決まった規則だけで行い、同じ入力なら毎回同じ CSV になる。回答の本文や出典の中の文は
   データとして照合するだけで、実行も解釈もしない。
 
-入力（作業フォルダ。既定は ai-search/）:
+入力（観測データのフォルダ。--workspace、既定は作業フォルダの中の ai-search/）:
   entities.csv  自社と競合の表記ゆれ・除外語・ドメイン（必須）
   prompts.csv   プロンプトセット（任意。あれば stage・branded・intent_group を結合する）
   answers/      回答ファイル（answers/<ラウンド>/<サービス>/<プロンプトID>-<回数>.md）。
@@ -41,7 +41,11 @@ normalize_observations.py - 回答ファイルを observations.csv と citations
   - 回答の欄だけを見る（出典の欄のページ名は数えない）。
   - 照合の前に、回答の欄の URL を空白に置き換える。Markdown のリンクは URL とタイトルを消し、リンクの文字は
     残す。参照形式のリンクは、定義の行（[1]: URL "タイトル"）をまるごと消す。リンクの文字がリンク先の
-    ドメインだけのもの（ChatGPT の出典の表示など）は、文字も消す。
+    ドメインだけのものは、文字も消す。
+  - 出典のチップ（半角のかっこの中がリンクだけのもの。([架空珈琲][1])、([架空珈琲](URL))、
+    ([A][1], [B][2])）は、リンクの文字がサイト名でも、かっこごと消す。ChatGPT の回答をコピーすると、
+    出典の表示がこの形になるため。かっこの中にほかの文字がある、全角のかっこ、かっこのないリンクは、
+    回答の文とみなして文字を残す（「[架空珈琲](URL)の豆は」は言及として数える）。
   - 回答の欄の URL の直後に空白なしで日本語が続き、その手前までが出典の欄の URL と同じなら、そこで URL を
     切り、日本語を照合に残す。出典の欄の URL は切らない（日本語を含む URL があるため）。
   - 本文と表記の両方を正規化（NFKC、大文字・小文字、ダッシュ類、連続する空白）してから探す。
@@ -66,13 +70,21 @@ observed_at:
   - 先頭の日付を YYYY-MM-DD の形にそろえて出す（「2026/10/01」「2026-10-1」「2026年10月1日」も読む）。
     compare_runs.py が観測した日数を数えるのに使うため。読めなければ元の値のまま出し、警告する。
 
+mode:
+  - 書いたとおりに出す（そろえない）。compare_runs.py は mode を書いたとおりに組に分けるため、次のときは警告する。
+    - status が 記録済み か AI の回答なし なのに、mode が空。
+    - 同じラウンド・サービスの回答に、空白・全角と半角・大文字と小文字だけが違う mode（「検索あり」と
+      「検索 あり」）がある。少ないほうの表記の回答に警告する（いちばん多い表記が決まらなければ、揺れたすべてに）。
+
 使い方:
   python3 normalize_observations.py [--workspace ai-search] [--rounds 2026-10-01,2026-10-08]
 
-終了コード: 0 成功、2 入力や引数の誤り（回答ファイルを読めない、出力を書けないを含む）、1 想定外のエラー。
+終了コード: 0 成功、2 入力や引数の誤り（entities.csv・prompts.csv・回答ファイルを読めない、出力を書けないを含む）、
+1 想定外のエラー。
 処理の要約と警告は標準エラー出力に出す。
 """
 import argparse
+import csv
 import datetime
 import json
 import os
@@ -123,6 +135,10 @@ MD_REF_DEF_RE = re.compile(
     r"(?:[^\S\n]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[^\S\n]*$", re.I | re.M)
 # 参照形式のリンク [文字][1]、[文字][]、[文字]。グループは 1 リンクの文字、2 参照の名前（なければ None）。
 MD_REF_USE_RE = re.compile(r"\[([^\[\]\n]+)\](?:\[([^\[\]\n]*)\])?")
+# 出典のチップの中で、リンクとリンクの間に置かれる区切り（空白と、カンマか読点1つ）
+_CHIP_SEPARATOR_RE = re.compile(r"[^\S\n]*(?:[,、，][^\S\n]*)?")
+# 出典のチップの閉じかっこ（前の空白を含む）
+_CHIP_CLOSE_RE = re.compile(r"[^\S\n]*\)")
 # URL の末尾から外す句読点（全角の ！？：； と、強調の * も外す）
 TAIL_PUNCT = ".,;:!?・…！？：；*"
 TRACKING_PARAMS = ("gclid", "fbclid", "srsltid", "yclid", "msclkid")
@@ -373,6 +389,36 @@ def _mask(text, spans):
     return "".join(chars)
 
 
+def _chip_spans(text, links):
+    # type: (str, list) -> list
+    """
+    出典のチップの範囲（かっこを含む）の一覧を返す。links はリンク全体の範囲 (開始, 終了) の一覧。
+    チップは、半角のかっこの中がリンクだけのもの: ([サイト名][1])、([サイト名](URL))、
+    ([A][1], [B][2]) のように複数を並べたもの。ChatGPT の回答をコピーすると、出典の表示がこの形になる。
+    かっこの中にリンクのほかの文字がある、全角のかっこ、かっこのないリンクは、回答の文とみなして含めない。
+    """
+    links = sorted(set(links))
+    out = []
+    i = 0
+    while i < len(links):
+        # 区切りだけをはさんで続くリンクを1つのまとまりにする
+        j = i
+        while (j + 1 < len(links) and links[j][1] <= links[j + 1][0]
+               and _CHIP_SEPARATOR_RE.fullmatch(text, links[j][1], links[j + 1][0])):
+            j += 1
+        start, end = links[i][0], links[j][1]
+        i = j + 1
+        k = start - 1
+        while k >= 0 and text[k] in " \t":
+            k -= 1
+        if k < 0 or text[k] != "(":
+            continue
+        close = _CHIP_CLOSE_RE.match(text, end)
+        if close:
+            out.append((k, close.end()))
+    return out
+
+
 def _scan_links(text, known_urls=None):
     # type: (str, object) -> tuple
     """
@@ -382,13 +428,16 @@ def _scan_links(text, known_urls=None):
       2. インラインのリンク [文字](URL "タイトル")。かっこの部分を消し、文字がリンク先のドメインだけなら文字も消す。
       3. 参照形式のリンク [文字][1]。[1] の部分を消し、文字がリンク先のドメインだけなら文字も消す。
          定義が見つからないときは、文字がドメインの形なら消す（出典の表示とみなす）。
-      4. ふつうの URL。対応する ( のない ) の手前で切り、末尾の句読点を外す。known_urls があれば、
+      4. 出典のチップ（半角のかっこの中がリンクだけのもの。_chip_spans）。リンクの文字がサイト名でも、
+         かっこごと消す（ChatGPT の出典の表示を、言及として数えないため）。
+      5. ふつうの URL。対応する ( のない ) の手前で切り、末尾の句読点を外す。known_urls があれば、
          _cut_at_known_prefix で後ろに続く日本語を外す。
     ホスト名のない URL（https:// だけ）は URL とみなさない。
     """
     text = text or ""
     found = []  # (開始, URL)
     cuts = []  # (開始, 終了)
+    links = []  # リンク全体の範囲 (開始, 終了)。出典のチップを見分けるのに使う
 
     definitions = {}
     def_spans = []
@@ -402,6 +451,7 @@ def _scan_links(text, known_urls=None):
     masked = _mask(text, def_spans)
 
     link_spans = []
+    inline_starts = set()
     for match in MD_LINK_RE.finditer(masked):
         url = clean_url_tail(match.group(3))
         if url and _has_host(url):
@@ -409,18 +459,25 @@ def _scan_links(text, known_urls=None):
             if _is_domain_label(match.group(1), url):
                 cuts.append(match.span(1))
         link_spans.append(match.span(2))
+        links.append(match.span())
+        inline_starts.add(match.start())
     cuts.extend(link_spans)
     masked = _mask(masked, link_spans)
 
     for match in MD_REF_USE_RE.finditer(masked):
+        if match.start() in inline_starts:
+            continue  # インラインのリンクの [文字] の部分（かっこの部分は隠してある）
         label, ref = match.group(1), match.group(2)
         url = definitions.get(_ref_key(ref if ref else label))
         if ref is None and url is None:
             continue  # 定義のない [1] は番号などで、リンクではない
+        links.append(match.span())
         if ref is not None:
             cuts.append((match.end(1) + 1, match.end()))  # [1] の部分
         if (_is_domain_label(label, url) if url is not None else _looks_like_domain(label)):
             cuts.append(match.span(1))
+
+    cuts.extend(_chip_spans(text, links))
 
     for match in URL_RE.finditer(masked):
         url = clean_url_tail(_trim_host_bleed(_cut_unbalanced_paren(match.group(0))))
@@ -447,8 +504,9 @@ def strip_urls(text, known_urls=None):
     # type: (str, object) -> str
     """
     言及の照合の前に、本文の URL を空白に置き換える。Markdown のリンクは URL とタイトルを消し、
-    リンクの文字は残す。参照形式のリンクの定義の行はまるごと消す。リンクの文字がリンク先のドメインだけなら
-    （ChatGPT の出典の表示など）、その文字も消す。known_urls は extract_urls と同じ。
+    リンクの文字は残す。参照形式のリンクの定義の行はまるごと消す。リンクの文字がリンク先のドメインだけなら、
+    その文字も消す。出典のチップ（([架空珈琲][1]) のように、半角のかっこの中がリンクだけのもの）は、
+    かっこごと消す。known_urls は extract_urls と同じ。
     """
     text = text or ""
     cuts = sorted(_scan_links(text, known_urls)[1])
@@ -716,7 +774,7 @@ def process_answer(path, rel_path, entities, prompts, round_hint=None):
     # type: (str, str, list, object, object) -> tuple
     """
     回答ファイル1つを読み、(observations.csv の行, citations.csv の行の一覧, 警告の一覧) を返す。
-    rel_path は作業フォルダからの相対パス（/ 区切り）。prompts は load_prompts の結果か None。
+    rel_path は観測データのフォルダ（--workspace）からの相対パス（/ 区切り）。prompts は load_prompts の結果か None。
     round_hint はラウンドのフォルダ名（省略すると rel_path の answers/<ラウンド>/ から取る）。
     ファイルを読めなければ（壊れたシンボリックリンク、権限がないなど）InputError を出す。
     """
@@ -804,6 +862,9 @@ def process_answer(path, rel_path, entities, prompts, round_hint=None):
         sources_status = "記録済み" if (source_urls or body_urls) else "不明"
     if status in ("AI の回答なし", "未記入") and has_answer:
         warnings.append("status が {} ですが、回答の欄に文字があります（status を確かめてください）".format(status))
+    if not field("mode") and status in ("記録済み", "AI の回答なし"):
+        warnings.append("mode が空です（ラウンドの前に決めた表記を書いてください。new_round.py の --mode でも入れられます。"
+                        "空のままだと compare_runs.py で別の組になり、前後の比較から外れます）")
     if sources_status == "なし" and source_urls:
         warnings.append("sources_status が なし ですが、出典の欄に URL があります（sources_status を確かめてください）")
     urlless = _count_urlless_source_lines(sources)
@@ -972,7 +1033,8 @@ def build_parser():
                "  python3 normalize_observations.py --workspace ai-search --rounds 2026-10-01,2026-10-08\n"
                "\n"
                "出力は毎回上書きする。--rounds を付けると、出力には指定したラウンドだけが入る。\n"
-               "終了コード: 0 成功、2 入力や引数の誤り（回答ファイルを読めない、出力を書けないを含む）、\n"
+               "終了コード: 0 成功、2 入力や引数の誤り（entities.csv・prompts.csv・回答ファイルを読めない、\n"
+               "出力を書けないを含む）、"
                "1 想定外のエラー。",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--workspace", default="ai-search", help="観測データのフォルダ（既定: ai-search。作業フォルダの中の ai-search/）")
@@ -1023,11 +1085,53 @@ def _write_output(path, write):
             os.path.basename(path), path, _os_reason(exc)))
 
 
-def _rate(k, n):
-    # type: (int, int) -> str
-    if not n:
-        return "{}/{}".format(k, n)
-    return "{}/{}（{:.1f}%）".format(k, n, 100.0 * k / n)
+def _load_csv(load, path):
+    # type: (object, str) -> object
+    """
+    entities.csv か prompts.csv を load で読む。CSV として読めない・ファイルを読めないときは InputError にする。
+    Python 3.9 の csv は NUL を含む行で csv.Error を出す。csv.Error は ValueError の下位クラスではないので、
+    個別に捕まえる。
+    """
+    try:
+        return load(path)
+    except OSError as exc:
+        raise common.InputError("{} を読めません（{}）。ファイルがあるか、読み取りの権限があるかを確かめてください".format(
+            path, _os_reason(exc)))
+    except (csv.Error, ValueError) as exc:
+        detail = "NUL 文字があります" if "NUL" in str(exc) else str(exc)
+        raise common.InputError("{} を CSV として読めません（{}）。NUL などの制御文字を除き、UTF-8 か Shift_JIS で"
+                                "保存してください".format(path, detail))
+
+
+def _mode_variant_warnings(items):
+    # type: (list) -> None
+    """
+    同じラウンド・サービスの回答で、空白・全角と半角・大文字と小文字だけが違う mode（「検索あり」と「検索 あり」）が
+    あれば、少ないほうの表記の回答に警告を足す。いちばん多い表記が1つに決まらなければ、揺れたすべての回答に足す。
+    compare_runs.py は mode を書いたとおりに組に分けるので、揺れた回答は別の組になり、前後の比較から外れる。
+    """
+    variants = {}  # (ラウンド, サービス, そろえた mode) → {mode: 件数}
+    for obs, _, _ in items:
+        mode = obs["mode"]
+        if mode:
+            key = (obs["round"], obs["service"], _loose(mode))
+            counts = variants.setdefault(key, {})
+            counts[mode] = counts.get(mode, 0) + 1
+    for obs, _, warnings in items:
+        mode = obs["mode"]
+        if not mode:
+            continue
+        counts = variants[(obs["round"], obs["service"], _loose(mode))]
+        if len(counts) < 2:
+            continue
+        ranked = sorted(counts, key=lambda value: (-counts[value], value))
+        if counts[ranked[0]] > counts[ranked[1]] and mode == ranked[0]:
+            continue  # いちばん多い表記
+        others = [value for value in ranked if value != mode]
+        warnings.append("mode の表記が、同じラウンド・サービスのほかの回答と違います: {}（ほかの回答: {}）。空白・"
+                        "全角と半角・大文字と小文字だけの違いでも、compare_runs.py では別の組になります".format(
+                            mode, "、".join(others)))
+        obs["warnings"] = " / ".join(warnings)
 
 
 def _run(args):
@@ -1040,12 +1144,15 @@ def _run(args):
     rounds = common.parse_id_list(args.rounds)
 
     if not os.path.isfile(entities_path):
+        hint = "" if args.entities else common.workspace_hint(entities_path, "entities.csv")
+        if hint:
+            raise common.InputError("entities.csv がありません: {}。{}".format(entities_path, hint))
         raise common.InputError("entities.csv がありません: {}（自社と競合の表記ゆれ・ドメインを先に書いてください。"
                                 "手順書 01-setup.md）".format(entities_path))
-    entities = common.load_entities(entities_path)
+    entities = _load_csv(common.load_entities, entities_path)
     prompts = None
     if os.path.isfile(prompts_path):
-        prompts = common.load_prompts(prompts_path)
+        prompts = _load_csv(common.load_prompts, prompts_path)
     else:
         common.log("警告: prompts.csv がないので、stage・branded・intent_group を空にします: {}".format(prompts_path))
     if not os.path.isdir(answers_dir):
@@ -1089,6 +1196,7 @@ def _run(args):
             others = [o["answer_file"] for o in group if o is not obs]
             warnings.append("同じ条件の回答が重複しています（{}）".format(", ".join(others)))
             obs["warnings"] = " / ".join(warnings)
+    _mode_variant_warnings(items)
 
     observations = [item[0] for item in items]
     citations = [c for item in items for c in item[1]]
@@ -1142,8 +1250,9 @@ def _run(args):
         common.log("  分母に入れなかった理由: " + "、".join(
             "{} {} 件".format(reason, count) for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1])))
     common.log("  自社の言及: {}（有効な回答だけ。全サービス・全条件の合計なので、比較には compare_runs.py を使う）".format(
-        _rate(sum(o["own_mentioned"] for o in valid_mention), len(valid_mention))))
-    common.log("  自社の引用: {}".format(_rate(sum(o["own_cited"] for o in valid_citation), len(valid_citation))))
+        common.format_rate(sum(o["own_mentioned"] for o in valid_mention), len(valid_mention))))
+    common.log("  自社の引用: {}".format(
+        common.format_rate(sum(o["own_cited"] for o in valid_citation), len(valid_citation))))
     common.log("  警告のある回答: {} 件".format(len([1 for item in items if item[2]])))
     common.log("  書き出し: {}, {}, {}".format(obs_path, cit_path, run_path))
     return 0

@@ -28,7 +28,7 @@ AI サービスに同じ条件で繰り返し尋ね、回答の原文を1回答1
 
 1. ラウンドの計画を立てる。使うサービス、回数、日程、条件（下の「ラウンドの決まり」）を決め、`ai-search/brief.md` の「観測の条件の決まり」に書く。初めてのサービスでは、付録「サービスごとの観測条件」にある「最初の観測で確かめること」も計画に入れる。
 2. サービスごとの条件を決める。ログイン状態、記憶・パーソナライズの切り方、ウェブ検索の指定、`mode` に書く文字列を、下の「サービスごとの既定の案」から選ぶ。観測の当日は、付録にあるそのサービスの「観測するときの手順」を手元に置く。
-3. ひな形を作る。`new_round.py` で、プロンプト × サービス × 回数の数だけ回答ファイルを作る（下の「コマンドの流れ」）。
+3. ひな形を作る。`new_round.py` で、プロンプト × サービス × 回数の数だけ回答ファイルを作る。手順2で決めた `mode` の文字列は `--mode` で入れておく（下の「コマンドの流れ」）。
 4. 尋ねて貼る。1回ごとに新しい会話を開き、回答ファイルの `prompt` の欄の文をそのまま AI に貼って尋ねる。回答を `## 回答` の下に、出典の URL を `## 出典` の下に貼り、`observed_at` に尋ねた日時を書く（下の「回答ファイルの書き方」）。
 5. 記録できなかった回答の `status` と、出典の状態の `sources_status` を書く（下の「status と sources_status の使い分け」）。
 6. CSV にする。`normalize_observations.py` を実行し、標準エラー出力の警告を1件ずつ直してから、もう一度実行する。
@@ -45,7 +45,7 @@ AI サービスに同じ条件で繰り返し尋ね、回答の原文を1回答1
 - 繰り返しは毎回新しい会話で行う。同じ会話の中で聞き直すと、前の質問と回答が文脈として残る。Google の AI モードは、追加の質問に前の質問の文脈を引き継ぐよう設計されていると説明されている（資料: https://search.google/pdf/google-about-AI-overviews-AI-Mode.pdf 、2025年5月の資料。2026-09-26 に確認）。
 - 前後を比べるときは、前の期間と後の期間で、繰り返しの回数と観測する日数をそろえる。そろっていなければ compare_runs.py が警告を出す。
 - 条件は回答ファイルの先頭の欄に書く。`service`・`surface`・`login`・`mode`・`region`・`language` の組ごとに集計され、組をまたいで合算されない。同じ条件は毎回同じ文字列で書く。
-- `mode` には、検索を指定したかを書く。ウェブ検索を明示的に指定したら `検索あり`、検索するかをサービスに任せたら `自動`。Google の AI による概要と AI モードは検索の中で回答を作るので `検索あり` とする。モデルやモードを選んだときは、画面に表示された名前を後ろに足す（例: `検索あり・Think`）。書き方はラウンドの前に決めて brief.md に書き、以後変えない。
+- `mode` には、検索を指定したかを書く。ウェブ検索を明示的に指定したら `検索あり`、検索するかをサービスに任せたら `自動`。Google の AI による概要と AI モードは検索の中で回答を作るので `検索あり` とする。モデルやモードを選んだときは、画面に表示された名前を後ろに足す（例: `検索あり・Think`）。`/` は入れない（実験の記録で組を書くとき、`/` を区切りに使うため。[06-experiments.md](06-experiments.md)）。new_round.py の `--mode` も `/` を受け付けない。書き方はラウンドの前に決めて brief.md に書き、以後変えない。
 - 観測する場所（ネットワーク）をそろえ、VPN を使わない。ChatGPT は、VPN やネットワークの場所で IP アドレスから推定される位置が変わることがあると説明している（資料: https://help.openai.com/ja-jp/articles/9237897-searching-the-web-with-chatgpt 、2026-09-26 に確認）。
 - 出典の欄に何を写すかも先に決める。広告、回答の末尾に出る「次に読む先」の提案、カルーセルなど、出典かどうか迷う表示は、最初のラウンドで扱いを決めて brief.md に書き、以後変えない。
 - 個人情報と社外秘の情報をプロンプトに入れない。
@@ -68,13 +68,14 @@ AI サービスに同じ条件で繰り返し尋ね、回答の原文を1回答1
 スクリプトは作業フォルダ（`ai-search/` がある場所）で実行する。使い方は `python3 <スキルのディレクトリ>/scripts/<名前>.py --help` で確かめてから使う。
 
 ```bash
-# 1. ひな形を作る（ログインなしで尋ねるサービス）
+# 1. ひな形を作る（ログインなしで、検索を指定して尋ねるサービス）
 python3 <スキルのディレクトリ>/scripts/new_round.py --round 2026-10-01 \
-  --services chatgpt,google-ai-mode --repeats 3 --login なし --region JP --language ja
+  --services chatgpt,google-ai-mode --repeats 3 --login なし --mode 検索あり --region JP --language ja
 
-# 同じラウンドで、ログインして記憶を切るサービスは別に作る（--login は1回の実行のすべてのファイルに入る）
+# 同じラウンドで、ログインして記憶を切るサービスは別に作る（--login と --mode は1回の実行のすべてのファイルに入る）
+# claude の mode は、Web search をオンにできない画面なら 自動 にする（サービスごとの既定の案）
 python3 <スキルのディレクトリ>/scripts/new_round.py --round 2026-10-01 \
-  --services claude --repeats 3 --login 'あり（記憶オフ）'
+  --services claude --repeats 3 --login 'あり（記憶オフ）' --mode 検索あり
 
 # 2. 回答を貼る（手作業）
 
@@ -87,10 +88,28 @@ python3 <スキルのディレクトリ>/scripts/compare_runs.py --period 2026-1
 ```
 
 - new_round.py は、prompts.csv の `active` が `yes` の行（`--prompts P001,P002` を付ければその ID だけ）について回答ファイルを作る。同じ名前のファイルがあれば上書きせず、作らなかった数を表示する。`--surface`（既定 `web`）、`--workspace`（既定 `ai-search`）も指定できる。
+- `--mode` は、作るすべてのファイルの `mode` に同じ値を入れる。既定は空で、付けなかったときは回答を貼るときに `mode` を書く。`/` と、先頭か空白の直後の `#` は使えない（終了コード 2 で止まる）。ファイルの名前に `--login` や `--mode` の値は入らないので、同じサービスを別の条件でも尋ねるときは、別のラウンド名にする。
 - `observed_at` には、ラウンド名が日付の形（`2026-10-01`）ならその日付が入る。別の日に尋ねた回答は、日付を尋ねた日に書き換える。書き換えないと、観測した日数の警告が正しく出ない。
-- normalize_observations.py は、実行のたびに CSV を上書きする（CSV は回答ファイルから作る派生物なので、手で直さない）。`--rounds 2026-10-01,2026-10-08` で読むラウンドを絞れる。標準エラー出力に、回答数、有効な回答数、無効の理由の内訳、自社の言及と引用の k/n、警告のある回答数が出る。
+- normalize_observations.py は、実行のたびに CSV を上書きする（CSV は回答ファイルから作る派生物なので、手で直さない）。標準エラー出力に、回答数、有効な回答数、無効の理由の内訳、自社の言及と引用の k/n、警告のある回答数が出る。
+- `--rounds 2026-10-01,2026-10-08` を付けると、出力（observations.csv と citations.csv）には指定したラウンドだけが入り、ほかのラウンドの行は消える。読む回答ファイルは絞られない。前後の比較の前には、`--rounds` なしで実行し直す。消えたラウンドを compare_runs.py で指定すると、「observations.csv にありません」で止まる。
 - entities.csv を直してから作り直すと、過去のラウンドの判定も変わる。observations.run.json に entities.csv の SHA-256 が残るので、実験中は [06-experiments.md](06-experiments.md) の手順で記録と照らす。
-- compare_runs.py の `--period` は、組ごとの回答数・有効な回答数・プロンプト数、言及率・引用率・誤った説明の率・AI の回答の表示率、無効な回答の理由の内訳、出典の並び順の分布、競合ごとの言及・引用、段階別と指名・非指名別の内訳、entities.csv にない出典のホスト（競合の追加候補）を出す。率はすべて `k/n（xx.x%）` の形になる。
+- compare_runs.py の `--period` は、組ごとの回答数・有効な回答数・プロンプト数、言及率・引用率・誤った説明の率・AI の回答の表示率、無効な回答の理由の内訳、出典の並び順の分布、競合ごとの言及・引用、段階別と指名・非指名別の内訳、entities.csv にない出典のホスト（競合の追加候補）を出す。率はすべて `k/n（xx.x%）` の形になる（分母が 0 なら `0/0（分母なし）`）。
+- 無効な回答は、組ごとの「分母に入れなかった回答」に、無効の理由と件数で出る。有効な回答も `AI の回答なし` の回答も1件もない組は、組の表から外し、末尾の「有効な回答がない組」の節にまとめられる。`--mode` を付けずに作ったひな形は `mode` が空なので、未記入のひな形は本来の組とは別の組（`mode` が `（空）`）としてこの節に出る。回答を貼って `mode` を書けば、本来の組に移る。`--mode` を付けて作ったひな形は、未記入のままでも本来の組に入り、`status が 未記入` として数えられる（組の回答がすべて未記入なら、その組ごとこの節に出る）。
+- サービスごとの記録の状態（下の出力フォーマットの「記録の状態」の表）は、compare_runs.py の出力にはない。observations.csv の `service`・`status`・`sources_status` を数えて作る。作ったファイルはサービスごとの行数、記録済み・AI の回答なし・回答拒否・エラー・未記入は `status` の値ごとの件数、出典が不明は `status` が `記録済み` で `sources_status` が `不明` の件数。
+
+### 率の分子と分母
+
+compare_runs.py は、4つの率を次の定義で数える（observations.csv の列で書く）。どの率も組ごとに数え、組をまたいで合算しない。
+
+| 率 | compare_runs.py の表示 | 分子 | 分母 |
+|---|---|---|---|
+| 言及率 | 自社の言及 | 分母のうち、`own_mentioned` が 1 の回答 | `valid_mention` が 1 の回答 |
+| 引用率 | 自社の引用 | 分母のうち、`own_cited` が 1 の回答 | `valid_citation` が 1 の回答 |
+| 誤った説明の率 | 誤った説明（人が確認済み） | 分母のうち、`accuracy` が `誤りあり` の回答 | `valid_mention` が 1 で、`reviewed_by` が `human`、`accuracy` が `誤りなし` か `誤りあり` の回答 |
+| AI の回答の表示率 | AI の回答の表示 | 分母のうち、`status` が `記録済み` の回答 | `status` が `記録済み` か `AI の回答なし` の回答 |
+
+- 誤った説明の率の分母に、Claude の下書き（`reviewed_by` が `claude-draft`）は入れない。下書きの件数は「Claude の下書きのみ n 件」として別に出る。自社の言及がある有効な回答のうち、分母にも下書きにも入らない回答（`accuracy` が `未確認` のもの、`reviewed_by` が空のものなど）は「未確認 n 件」として出る。`accuracy` が `該当なし` の回答は、どちらにも数えない（詳しくは下の「回答の正誤の判定」）。
+- AI の回答の表示率は、`valid_mention` を見ない。`未記入`・`回答拒否`・`エラー` の回答は分母に入らない。
 
 ### 回答ファイルの書き方
 
@@ -129,10 +148,10 @@ reviewed_by:
 |---|---|---|
 | `round` | ラウンド名 | new_round.py |
 | `prompt_id`、`prompt` | prompts.csv の ID と質問文。AI には `prompt` の文をそのまま貼る。書き換えない | new_round.py |
-| `observed_at` | 尋ねた日時（`2026-10-01 14:05` の形）。日付は new_round.py が入れるので、時刻を足し、別の日なら日付も直す | new_round.py とユーザー |
+| `observed_at` | 尋ねた日時（`2026-10-01 14:05` の形）。日付は new_round.py が入れるので、時刻を足し、別の日なら日付も直す。`2026/10/01`、`2026-10-1`、`2026.10.01`、`2026年10月1日` も読み、observations.csv では `YYYY-MM-DD` の形にそろえて出す。有効な回答で日付を読めないと警告が出て、その回答は観測した日数の確認から外れる | new_round.py とユーザー |
 | `service` | `chatgpt` / `claude` / `perplexity` / `gemini` / `copilot` / `google-ai-mode` / `google-aio` | new_round.py |
 | `surface` | `web`（ブラウザ）/ `app`（アプリ）/ `api` | new_round.py |
-| `mode` | ラウンドの前に決めた文字列（上の「ラウンドの決まり」） | ユーザー |
+| `mode` | ラウンドの前に決めた文字列（上の「ラウンドの決まり」） | new_round.py（`--mode`）かユーザー |
 | `login` | `なし` / `あり（記憶オフ）` / `あり`。実際の状態と違えば直す | new_round.py とユーザー |
 | `region`、`language` | 地域（既定 `JP`）と回答の言語（既定 `ja`） | new_round.py |
 | `repeat` | 何回目か（1, 2, 3） | new_round.py |
@@ -141,14 +160,51 @@ reviewed_by:
 | `accuracy_note` | 誤りの中身と、照らした brief.md の項目 | Claude が下書き、ユーザーが確定 |
 | `reviewed_by` | 空 / `claude-draft` / `human` | Claude とユーザー |
 
+- `service`・`surface`・`login`・`status`・`sources_status`・`accuracy`・`reviewed_by` の決まった値は、全角・半角、大文字・小文字、空白の違いだけならそろえて読む（例: `ChatGPT` と書いても `chatgpt` として読む）。`mode`・`region`・`language` はそろえずにそのまま組に使うので、毎回同じ文字列で書く。
+- normalize_observations.py は、`mode` について2つの警告を出す。1つは、`status` が `記録済み` か `AI の回答なし` なのに `mode` が空のとき。もう1つは、同じラウンド・サービスの回答に、空白・全角と半角・大文字と小文字だけが違う表記（`検索あり` と `検索 あり`）が混ざっているとき。警告は、いちばん多い表記以外の回答に出る（いちばん多い表記が1つに決まらなければ、揺れたすべての回答に出る）。
 - 先頭の欄は1項目1行。値の中で、空白に続けて `#` を書かない（それより後ろはコメントとして捨てられる）。
-- 見出しは `## 回答` と `## 出典` にする（`## Answer` と `## Sources` も読める）。`## 回答` の見出しがない回答は無効になる。
 - 回答は、画面の文をそのまま貼る。要約したり、言い回しを直したりしない。貼ったあとで回答の欄と出典の欄を書き換えない。
-- 本文中のリンクがコピーで消えるときは、リンクが付いていた語の直後に URL を書き足す。回答の欄の URL は、本文のリンク（`location` が `body`）として引用の判定に入る。
+- 本文中のリンクがコピーで消えるときは、リンクが付いていた語の直後に URL を書き足し、URL の後ろには半角の空白か改行を入れる。全角のかっこで囲んでもよい（例（架空）: `架空珈琲（https://kakuu-coffee.example/）が…`）。URL のすぐ後ろに空白なしで続けた日本語は URL の一部とみなされることがあり、その中の社名は言及として数えられない。回答の欄の URL は、本文のリンク（`location` が `body`）として引用の判定に入る。
 - コピーボタンで出典の URL が残らないサービスでは、出典の URL を画面から1つずつ写す。残るかどうかは、どのサービスでも公式資料では確認できていないので、最初の観測で確かめる。
-- 出典の欄には、画面の上から順に URL を1行ずつ書く。「1. 架空珈琲 公式サイト」のようにページ名だけの行や、`kakuu-coffee.example/menu` のようにスキームのないドメインは URL として数えず、「URL のない出典の行が n 行あります」と警告される。出典にページ名しか表示されないときは、リンクを開いて URL を写す。
+- 出典の欄には、画面の上から順に URL を1行ずつ書く。「1. 架空珈琲 公式サイト」のようにページ名だけの行や、`kakuu-coffee.example/menu` のようにスキームのないドメインは URL として数えず、「URL のない出典の行が n 行あります」と警告される。ページ名の行のすぐ次の行に、番号や記号を付けずに URL を書いたときは、同じ出典の続きとみなして警告しない。出典にページ名しか表示されないときは、リンクを開いて URL を写す。
 - 同じ URL が2回出たら、2回目以降は数えない。出典の並び順（`source_order`）は画面の表示順で、重要度や順位を表すとは限らない。
 - `vertexaisearch.cloud.google.com/grounding-api-redirect/...` のようなリダイレクト用の URL や、`bit.ly` などの短縮 URL は、行き先がわからない出典（`unresolved`）として数えられる。リンクを開き、移った先のページの URL を写せば、行き先不明の出典を減らせる。`https://www.google.com/url?q=...` の形は、スクリプトが行き先の URL に戻す。
+
+見出しの書き方:
+
+- 見出しは `## 回答` と `## 出典` にする。`## Answer`・`## Sources`、見出しの語の後ろに補足を付けた `## 出典:`・`## 出典（3件）`、全角の `＃＃　回答` も読む。`## 回答` の見出しがない回答は無効になる。
+- `## 参考`・`## 参考文献`・`## 引用元`・`## 情報源`・`## References`・`## Citations` なども、出典の見出しとして読む。AI の回答の本文にこれらの見出しがあると、その下は出典の欄に入り、言及として数えない。
+- AI の回答の本文にある、そのほかの `##` の見出し（`## 選び方` など）では、回答の欄は切れない。
+- メモを残すときは、`## 出典` の欄より後ろに、別の `##` の見出し（`## メモ` など）を付けて書く。その下はどちらの欄にも入らない。`## 出典` を使わず `## 参考文献` などを出典の見出しにすると、その後ろのメモは回答の欄に戻り、中の社名が言及として数えられる。
+- `## ソース` は出典の見出しとして読まない。Gemini の［ソース］の一覧を写すときも、見出しは `## 出典` にする。出典の見出しが見つからず、回答の欄に `##` の見出しがあると、「## 出典 の見出しが見つかりません」と警告される。
+
+Markdown のリンクの読み方:
+
+- `[文字](URL "タイトル")` の形のリンクは、URL とタイトルを消してから言及を探す。リンクの文字は言及として数える（例（架空）: `[架空珈琲](https://kakuu-coffee.example/)の豆は…` は自社の言及あり）。ただし、文字がリンク先のドメインだけのもの（ChatGPT の出典の表示の `kakuu-coffee.example` など）は数えない。
+- 半角のかっこの中がリンクだけのもの（出典のチップ）は、リンクの文字がサイト名でも、かっこごと消して言及に数えない。`([サンプル焙煎][2])`、`([サンプル焙煎](URL))`、`([架空珈琲][1], [サンプル焙煎][2])` のように空白・カンマ・読点で区切って並べたものも同じ。ChatGPT の回答をコピーすると、出典の表示がこの形になるため。
+- かっこの中にリンクのほかの文字があるもの（`([架空珈琲][1] 参照)`）、全角のかっこで囲んだもの（`（[架空珈琲][1]）`）、かっこのないリンクは、回答の文とみなし、リンクの文字を言及に数える。
+- 参照形式の定義の行（`[1]: URL "タイトル"`）は、タイトルも含めて行ごと消す。本文の `[文字][1]` は、`[1]` の部分を消し、リンクの文字を残す。
+- 回答の欄のリンクの URL は、どの形でも、本文のリンク（`location` が `body`）として引用の判定に入る。
+
+ChatGPT のコピーボタンで写した回答:
+
+ChatGPT の回答をコピーボタンで写すと、出典が Markdown のリンクの形で本文に入ることがある。本文に `([kakuu-coffee.example](URL))` のようなドメインのチップや `([サンプル焙煎][2])` のようなサイト名のチップが付き、末尾に `[1]: URL "タイトル"` の定義の行が並ぶ形。形は画面の更新で変わりうるので、最初の観測で確かめる。記入した例（架空）:
+
+```markdown
+## 回答
+水出しには、苦みの出にくい中深煎りの豆がよく使われます。架空珈琲は中深煎りの水出し用ブレンドを扱っています。([kakuu-coffee.example][1]) 浅煎りならサンプル焙煎の豆もあります。([サンプル焙煎][2])
+
+[1]: https://kakuu-coffee.example/menu/cold-brew?utm_source=chatgpt.com "水出し用ブレンド | 架空珈琲"
+[2]: https://sample-roast.example/cold-brew?utm_source=chatgpt.com "浅煎りの豆 | サンプル焙煎"
+
+## 出典
+1. https://kakuu-coffee.example/menu/cold-brew
+2. https://sample-roast.example/cold-brew
+```
+
+- コピーした文は、定義の行も含めてそのまま `## 回答` に貼る。本文のリンクの URL と末尾の定義の行の URL は、本文のリンク（`location` が `body`）として数える。
+- 出典の並び順（`source_order`）を残すには、「情報源」に並ぶ順に URL を `## 出典` に写す（引用された情報源だけ。付録の ChatGPT の節）。定義の行は `## 回答` に残したままにする。回答の欄と出典の欄に同じ URL があっても、出典の欄の URL として1回だけ数える。出典の欄を空のままにすると、引用は数えられるが `source_order` が付かず、compare_runs.py の出典の並び順では「本文のリンクだけ」に入る。
+- チップの文字は、ドメイン（`kakuu-coffee.example`）でもサイト名（`サンプル焙煎`）でも、言及に数えない（上の「Markdown のリンクの読み方」）。この例で自社と競合の言及ありになるのは、本文に「架空珈琲は」「サンプル焙煎の豆」とあるため。チップにだけ出た社名は言及にならない。
 
 ### status と sources_status の使い分け
 
@@ -177,6 +233,23 @@ reviewed_by:
 
 サービスが出典を出さなかった回答で `sources_status` を空にすると、`不明` とみなされて引用率の分母から外れる。出典がないのも観測の結果なので、`なし` と書く。反対に、写しそびれただけの回答に `なし` と書くと、引用があったかもしれない回答を「引用なし」として数えてしまう。迷ったら `不明` にする。
 
+### 分母に入れなかった理由（exclusion_reason）
+
+observations.csv の `exclusion_reason` には、回答を言及率や引用率の分母に入れなかった理由が入る。理由が2つ以上あれば `; ` でつなぐ（例: `status が 未記入; ## 回答 の見出しがない`）。normalize_observations.py の標準エラー出力の「分母に入れなかった理由」と、compare_runs.py の「分母に入れなかった回答」も、この文ごとに件数を出す。
+
+| exclusion_reason の文 | 意味 | 外れる分母 |
+|---|---|---|
+| `status が ○○` | `status` が `記録済み` でない（`未記入`、`AI の回答なし`、`回答拒否`、`エラー`、または決まった値以外の値）。○○ に値が入る | 言及率と引用率 |
+| `必須の欄がない: ○○` | `round`・`prompt_id`・`service`・`surface`・`login`・`repeat` のどれかが空。○○ に欄の名前が入る | 言及率と引用率 |
+| `値が不正: ○○` | 必須の欄の値が、決まった値や形でない（`service` が一覧にない、`repeat` が1以上の整数でない、など）。書いた値は警告に出る | 言及率と引用率 |
+| `## 回答 の見出しがない` | `## 回答` の見出しが見つからない | 言及率と引用率 |
+| `回答が空` | `status` に `記録済み` と書いたのに、回答の欄が空 | 言及率と引用率 |
+| `出典が不明` | `sources_status` が `不明`（空のままで、出典の欄にも回答の欄にも URL がない場合を含む） | 引用率だけ |
+| `sources_status の値が不正` | `sources_status` が決まった値（空、`記録済み`、`なし`、`不明`）のどれでもない | 引用率だけ |
+
+- `status` が空で回答の欄も空なら、`status` は `未記入` とみなされるので、理由は `回答が空` ではなく `status が 未記入` になる。
+- 表の最後の2つ（`出典が不明` と `sources_status の値が不正`）は、言及率の分母に入る回答にだけ書かれる。言及率の分母から外れた回答には、出典が不明でも付かない。
+
 ### 回答の正誤の判定
 
 正誤の判定は、自社についての記述が brief.md の正しい事実と合っているかを見る。回答全体の品質は判定しない。
@@ -185,7 +258,7 @@ reviewed_by:
 2. observations.csv で、`valid_mention` が 1 の回答を選ぶ。`own_mentioned` が 0 の回答は、accuracy を `該当なし` にする。
 3. 自社に言及した回答では、自社についての記述（料金、営業時間、取扱商品、所在地、代表者名など）を1つずつ brief.md の値と照らす。誤りがあれば accuracy を `誤りあり` にし、accuracy_note に誤りの種類と中身を1行で書く。種類は [04-citation-gap.md](04-citation-gap.md) の分類（古い情報、他社との混同、存在しない商品や機能、誤った数値）を使い、あとで数えやすいよう先頭に置く。例（架空）: `古い情報: 定休日を月曜と説明（brief.md では火曜、確認日 2026-09-20）`
 4. 照らせた記述がすべて正しければ `誤りなし` にする。brief.md にない事柄についての記述は、正しいとも誤りとも判定しない（鉄則7）。accuracy_note に `[要確認: ○○]` と書き、ユーザーに事実を確かめてもらう。照らせる記述が1つもなければ `未確認` のまま残す。
-5. Claude が書いた回答は `reviewed_by` を `claude-draft` にする。ユーザーが下書きを確かめて確定したら `human` にする。誤った説明の率の分母に入るのは `human` の回答だけで、`claude-draft` は未確認の件数として別に数えられる。
+5. Claude が書いた回答は `reviewed_by` を `claude-draft` にする。ユーザーが下書きを確かめて確定したら `human` にする。誤った説明の率の分母に入るのは、有効な回答（`valid_mention` が 1）のうち、`reviewed_by` が `human` で accuracy が `誤りなし` か `誤りあり` の回答だけ。`claude-draft` の回答は分母に入れず、報告では「Claude の下書きのみ n 件」として、未確認とは別に示される。未確認は、自社の言及がある有効な回答のうち、人も Claude もまだ正誤を書いていないもの（accuracy が `該当なし` の回答は入らない）。accuracy を `誤りあり` や `誤りなし` にしても、`reviewed_by` が空なら未確認に数えられる。ユーザーが自分で判定を書いたときも、`reviewed_by` を `human` にする。
 6. 判定を書き込んだら normalize_observations.py を実行し直す。
 
 - Claude は、先頭の欄のうち `accuracy`、`accuracy_note`、`reviewed_by` だけを書き換える。回答の欄と出典の欄には手を入れない。
@@ -203,10 +276,10 @@ reviewed_by:
 
 ```text
 ai-search-operator の 03-observation.md に従って、観測ラウンド {2026-10-01} を準備してください。
-- サービス: {chatgpt, google-ai-mode}（ログイン状態: {なし}）、{claude}（ログイン状態: {あり（記憶オフ）}）
+- サービス: {chatgpt, google-ai-mode}（ログイン状態: {なし}、mode: {検索あり}）、{claude}（ログイン状態: {あり（記憶オフ）}、mode: {検索あり}）
 - 回数: 各3回、{2026-10-01} と {2026-10-02} に分けて尋ねる
 - 対象: prompts.csv の active=yes の全件
-new_round.py の --help を確かめてからひな形を作り、作ったファイルの数と1ラウンドの記録数を教えてください。
+new_round.py の --help を確かめてからひな形を作り（mode は --mode で入れる）、作ったファイルの数と1ラウンドの記録数を教えてください。
 サービスごとの条件（mode に書く文字列、記憶の切り方、出典の写し方）と、最初の観測で確かめることを一覧にしてください。
 回答は私が画面で尋ねて貼ります。回答を推測で埋めないでください。
 ```
@@ -240,11 +313,11 @@ ai-search/brief.md の「正しい事実の一覧」と照らして、ラウン�
 - 次の一手: {例: 引用ギャップの分析（04）、status の書き直し、brief.md への事実の追加}
 
 ### 組ごとの集計（compare_runs.py --period の出力から）
-| 組 | 回答 | 有効（言及 / 引用） | 自社の言及 | 自社の引用 | 誤った説明（確認済み） | AI の回答の表示 |
+| 組 | 回答 | 有効（言及 / 引用） | 自社の言及 | 自社の引用 | 誤った説明（人が確認済み） | AI の回答の表示 |
 |---|---|---|---|---|---|---|
-| {chatgpt / web / なし / 検索あり / JP / ja} | {n} | {n / n} | {k/n（xx.x%）} | {k/n（xx.x%）} | {k/n}、未確認 {n} 件 | {k/n（xx.x%）} |
+| {chatgpt / web / なし / 検索あり / JP / ja} | {n} | {n / n} | {k/n（xx.x%）} | {k/n（xx.x%）} | {k/n}、未確認 {n} 件、Claude の下書きのみ {n} 件 | {k/n（xx.x%）} |
 
-### 記録の状態
+### 記録の状態（observations.csv から数える）
 | サービス | 作ったファイル | 記録済み | AI の回答なし | 回答拒否 | エラー | 未記入 | 出典が不明 |
 |---|---|---|---|---|---|---|---|
 
@@ -276,6 +349,7 @@ ai-search/brief.md の「正しい事実の一覧」と照らして、ラウン�
 - 条件の違う回答を合算する: ログインの有無、モード、地域が違えば別の組として報告する（鉄則3）。
 - 出典の並び順を順位として読む: `source_order` は画面の表示順。重要度の説明はどのサービスの公式資料にもない。
 - Claude の下書きのまま誤った説明の率を出す: `claude-draft` は確定値ではない。ユーザーが確かめて `human` にした回答だけが分母に入る。
+- accuracy だけを書いて `reviewed_by` を空にする: 判定を書いても未確認に数えられる。ユーザーが判定したら `human` と書く。
 - 回答の欄を読みやすく直す: 原文でなくなり、言及の判定も変わる。貼ったままにする。
 - ブラウザの自動操作やスクレイピングで回答を集める: 各社の規約に触れる（上の「自動取得をしない理由」）。
 - Perplexity を既定で観測に入れる: 利用規約は手作業による収集も禁じている。入れるかはユーザーが規約を読んで決める。
@@ -443,11 +517,11 @@ ai-search/brief.md の「正しい事実の一覧」と照らして、ラウン�
 4. https://support.google.com/websearch/answer/17024959?hl=en
 5. https://support.google.com/websearch/answer/17026260?hl=en
 6. https://blog.google/products-and-platforms/products/search/explore-web-generative-ai-search/
-7. https://developers.google.com/search/docs/appearance/ai-features
+7. https://developers.google.com/search/docs/appearance/ai-features?hl=ja
 8. https://support.google.com/websearch/answer/179386?hl=en&co=GENIE.Platform%3DDesktop
 9. https://policies.google.com/terms?hl=en-US
 10. https://www.google.com/robots.txt
-11. https://developers.google.com/search/docs/essentials/spam-policies
+11. https://developers.google.com/search/docs/essentials/spam-policies?hl=ja
 
 ### Copilot（`copilot`）
 
@@ -481,12 +555,12 @@ ai-search/brief.md の「正しい事実の一覧」と照らして、ラウン�
 資料:
 1. https://www.microsoft.com/ja-jp/microsoft-copilot/for-individuals/termsofuse
 2. https://support.microsoft.com/en-us/microsoft-365-copilot/what-s-the-difference-between-microsoft-copilot-free-and-copilot-in-microsoft-365
-3. https://support.microsoft.com/en-us/microsoft-copilot/transparency-note-for-microsoft-copilot
+3. https://support.microsoft.com/en-us/privacy/microsoft-copilot/transparency-note
 4. https://support.microsoft.com/ja-jp/privacy/microsoft-copilot/privacy-controls
 5. https://support.microsoft.com/en-us/microsoft-copilot/conversation-modes-in-microsoft-copilot
 6. https://support.microsoft.com/en-us/privacy/microsoft-copilot/privacy-controls
-7. https://support.microsoft.com/en-us/Microsoft-365-Copilot/how-web-search-works-in-microsoft-365-copilot-chat-and-agents
-8. https://support.microsoft.com/en-us/topic/26de43a1-c176-4908-bef7-29c8c37ac7ce
+7. https://support.microsoft.com/en-us/microsoft-365-copilot/how-web-search-works-in-microsoft-365-copilot-chat-and-agents
+8. https://support.microsoft.com/en-us/microsoft-copilot/supported-regions-and-languages-in-microsoft-copilot
 9. https://www.microsoft.com/en-us/servicesagreement
 
 ### Perplexity（`perplexity`）
