@@ -1,0 +1,27 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:  # 手動でも実行できるようにする（ランナーの OS が変わったときの確認など）
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 は macOS に標準で入っている版。3.13 は新しい版での確認
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 全テスト（標準ライブラリだけで動くので、パッケージは入れない）
+        run: python -m unittest discover -s tests -v

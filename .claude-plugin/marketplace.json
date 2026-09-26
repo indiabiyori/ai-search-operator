@@ -1,0 +1,14 @@
+{
+  "name": "ai-search-operator",
+  "description": "日本語サイト向けの AI 検索の観測スキル ai-search-operator を配布するマーケットプレイス",
+  "owner": {
+    "name": "indiabiyori"
+  },
+  "plugins": [
+    {
+      "name": "ai-search-operator",
+      "source": "./",
+      "description": "日本語サイト向けの AI 検索の観測スキル（言及・引用の記録、改善実験の判定、AI クローラーの方針）"
+    }
+  ]
+}

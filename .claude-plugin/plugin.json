@@ -1,0 +1,12 @@
+{
+  "name": "ai-search-operator",
+  "description": "日本語サイト向けの AI 検索の観測スキル。AI の回答での言及・引用を記録し、改善を件数に基づいて判定する",
+  "version": "1.0.0",
+  "author": {
+    "name": "indiabiyori"
+  },
+  "homepage": "https://github.com/indiabiyori/ai-search-operator",
+  "repository": "https://github.com/indiabiyori/ai-search-operator",
+  "license": "MIT",
+  "keywords": ["ai-search", "geo", "llm-citations", "japanese", "agent-skills"]
+}
