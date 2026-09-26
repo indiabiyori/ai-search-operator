@@ -1,0 +1,7 @@
+operator,token,category,purpose,robots_control,block_effect,source_url,checked_on
+OpenAI,GPTBot,training,テスト用の行（判定のテストだけに使う）,robots.txt,テスト用,https://example.com/test,2026-09-26
+OpenAI,OAI-SearchBot,search,テスト用の行（判定のテストだけに使う）,robots.txt,テスト用,https://example.com/test,2026-09-26
+OpenAI,ChatGPT-User,user,テスト用の行（判定のテストだけに使う）,robots.txt,テスト用,https://example.com/test,2026-09-26
+Google,Google-Extended,control,テスト用の行（判定のテストだけに使う）,robots.txt,テスト用,https://example.com/test,2026-09-26
+Google,Googlebot,general-search,テスト用の行（判定のテストだけに使う）,robots.txt,テスト用,https://example.com/test,2026-09-26
+Common Crawl,CCBot,dataset,テスト用の行（判定のテストだけに使う）,robots.txt,テスト用,https://example.com/test,2026-08-01

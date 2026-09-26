@@ -233,5 +233,30 @@ class MiscTest(unittest.TestCase):
         self.assertEqual(common.parse_id_list(""), [])
 
 
+class ArgumentParserTest(unittest.TestCase):
+    def test_help_in_japanese(self):
+        parser = common.ArgumentParser(prog="x.py", description="説明")
+        parser.add_argument("--round", required=True)
+        text = parser.format_help()
+        self.assertIn("この使い方を表示して終わる", text)
+        self.assertNotIn("show this help message", text)
+
+    def test_error_in_japanese_exit_2(self):
+        import contextlib
+        import io
+        parser = common.ArgumentParser(prog="x.py")
+        parser.add_argument("--round", required=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                parser.parse_args([])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("次の引数が必要です: --round", err.getvalue())
+
+    def test_translate_unknown_message(self):
+        self.assertEqual(common.translate_argparse("something else"), "something else")
+        self.assertEqual(common.translate_argparse("unrecognized arguments: --x"), "使えない引数があります: --x")
+
+
 if __name__ == "__main__":
     unittest.main()

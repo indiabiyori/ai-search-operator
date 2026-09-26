@@ -1,0 +1,5 @@
+entity_id,kind,name,terms,exclude_terms,domains
+own-company,own,架空珈琲,架空珈琲|かくうコーヒー|kakuu coffee|kakuucoffee,,kakuu-coffee.example
+own-ceo,own,山田架空,山田架空,,
+comp-a,competitor,サンプル焙煎,サンプル焙煎|sample roast,,sample-roast.example
+comp-b,competitor,テスト豆店,テスト豆店,テスト豆店舗,test-mame.example

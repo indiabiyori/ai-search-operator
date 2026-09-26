@@ -13,7 +13,9 @@ ai_robots_check.py、new_round.py）が import する。Python 3.9 以上の標�
     （CSV インジェクション対策）。読むときはその ' を外す
   - 回答ファイルの先頭の欄（--- で囲んだ key: value の行）の解析
   - entities.csv と prompts.csv の読み込みと検証
+  - -h の説明と引数の誤りの文を日本語にした ArgumentParser
 """
+import argparse
 import codecs
 import csv
 import hashlib
@@ -297,3 +299,44 @@ def load_prompts(path):
                 where, " / ".join(BRANDED_VALUES), row["branded"]))
         prompts[pid] = row
     return prompts
+
+
+# argparse の誤りの文（英語）を日本語にする。Python 3.9〜3.13 で同じ文
+_ARGPARSE_MESSAGES = (
+    (re.compile(r"^the following arguments are required: (.+)$"), "次の引数が必要です: {0}"),
+    (re.compile(r"^unrecognized arguments: (.+)$"), "使えない引数があります: {0}"),
+    (re.compile(r"^ambiguous option: (\S+) could match (.+)$"),
+     "{0} は複数の引数（{1}）に当てはまります。省略せずに書いてください"),
+    (re.compile(r"^argument (\S+): expected one argument$"), "{0} に値を指定してください"),
+    (re.compile(r"^argument (\S+): invalid int value: (.+)$"), "{0} は整数で指定してください: {1}"),
+    (re.compile(r"^argument (\S+): invalid float value: (.+)$"), "{0} は数値で指定してください: {1}"),
+    (re.compile(r"^argument (\S+): invalid choice: (.+)$"), "{0} に使えない値です: {1}"),
+    (re.compile(r"^argument (\S+): invalid \S+ value: (.+)$"), "{0} の値が正しくありません: {1}"),
+    (re.compile(r"^argument (\S+): ignored explicit argument (.+)$"), "{0} には値を付けられません: {1}"),
+    (re.compile(r"^argument (\S+): not allowed with argument (.+)$"), "{0} は {1} と一緒に使えません"),
+    (re.compile(r"^argument (\S+): (.+)$"), "{0}: {1}"),
+)
+
+
+def translate_argparse(message):
+    # type: (str) -> str
+    """argparse の誤りの文を日本語にする。知らない文はそのまま返す。"""
+    for pattern, template in _ARGPARSE_MESSAGES:
+        match = pattern.match(message)
+        if match:
+            return template.format(*match.groups())
+    return message
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    """-h の説明と引数の誤りの文を日本語にする。引数の誤りは終了コード 2 で終える。"""
+
+    def __init__(self, *args, **kwargs):
+        kwargs["add_help"] = False
+        kwargs.setdefault("formatter_class", argparse.RawDescriptionHelpFormatter)
+        argparse.ArgumentParser.__init__(self, *args, **kwargs)
+        self.add_argument("-h", "--help", action="help", help="この使い方を表示して終わる")
+
+    def error(self, message):
+        # type: (str) -> None
+        self.exit(2, "エラー: 引数の誤り: {}（--help で使い方を表示）\n".format(translate_argparse(message)))
