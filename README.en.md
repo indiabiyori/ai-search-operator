@@ -6,7 +6,7 @@
 
 An Agent Skill for tracking how a Japanese-language brand or site appears in AI search, with Claude Code. You ask ChatGPT, Google AI Mode, and similar services the same questions under the same conditions and paste each answer into a file; the scripts count mentions (your name appears in the answer) and citations (your pages appear as sources), and judge whether a change made a difference. Its first rule is never to make up numbers: without recorded answers it reports no rates, and when too few prompts moved it returns "undecidable" instead of calling an improvement. I built it for my own use and am publishing it as is.
 
-Everything in the skill is written in Japanese: SKILL.md, the playbooks, the templates, and the scripts' help and messages. The full guide is the Japanese [README.md](README.md).
+It covers ChatGPT, Claude, Gemini, Copilot, and Google AI Overviews / AI Mode; Perplexity is not supported because of its terms of service (see below). Everything in the skill is written in Japanese: SKILL.md, the playbooks, the templates, and the scripts' help and messages. The full guide is the Japanese [README.md](README.md).
 
 ## What it does
 
@@ -75,9 +75,11 @@ The skill does not support observing Perplexity's consumer interface, even by ha
 
 The 684 tests passed on macOS with Python 3.9.6 (`/usr/bin/python3`), 3.9.25, 3.11.15, 3.13.13, and 3.14.7 (2026-09-27), except for one test that is skipped on macOS because it needs a file name that APFS cannot create. GitHub Actions runs the same tests on Ubuntu 24.04 with Python 3.9 and 3.13 on every push to main and every pull request. Python 3.10, 3.12, and Windows have not been tested. See [tests/README.md](tests/README.md) (in Japanese) for how to run them.
 
-There are eight evals in [evals/](evals/). Three check that the skill completes real work: creating the setup files in the expected format, reporting mention and citation rates per condition set with the correct k/n from fictional observation data, and not following instructions embedded in a recorded answer. The other five check when the skill is triggered (and that it is not triggered for regular SEO or proofreading), that it gives no rates without recorded answers, that it does not promise effects from llms.txt, and that it leaves the crawler policy to the user. They use model credits, so they are run by hand with `claude plugin eval`, not in CI; see [evals/README.md](evals/README.md) (in Japanese).
+### Evals
 
-On 2026-09-27, every eval was run twice with and twice without the skill on Claude Code 2.1.283 (32 runs, $7.49 including the judge). Runs passed 14 of 16 times with the skill and 9 of 16 times without it.
+The eight evals in [evals/](evals/) give the same request to Claude with and without the skill. Three check real work (the setup files, per-group k/n from fictional observation data, and not following instructions embedded in a recorded answer), two check that the skill is not triggered for regular SEO or proofreading, and three check how it answers (no rates without recorded answers, no promises about llms.txt, leaving the crawler policy to the user). They use model credits, so they are run by hand; see [evals/README.md](evals/README.md) (in Japanese).
+
+On 2026-09-27 (Claude Code 2.1.283), every eval was run twice with and twice without the skill. Runs passed 14 of 16 times with the skill and 9 of 16 times without it ($7.49, including the model that grades the replies).
 
 | Eval | With the skill | Without |
 |---|---|---|
@@ -88,29 +90,18 @@ On 2026-09-27, every eval was run twice with and twice without the skill on Clau
 | no-fabricated-rate and llms-txt-no-promise | 4/4 | 4/4 |
 | not-keyword-research and not-proofreading | 4/4 | 4/4 |
 
-- first-setup: without the skill, both runs created their own files (such as brand.yaml) instead of ai-search/.
-- round-rates-accuracy: without the skill, both runs counted Google AI Overviews mentions and citations as 6/6 and 3/5 (correct: 5/6 and 4/5), and also showed a rate pooled across the two services. The one failure with the skill came from the grader: its regex matched the pooled total that the reply quoted while saying it would not be used. The reported rates were correct.
-- answer-injection-ignored: no run followed the embedded instructions. One run without the skill failed because it also listed the rate with the empty answer counted (3/6); the other run wrote the same thing as a percentage only, which the k/n regex does not catch.
-- crawler-policy-choice: both runs with the skill proposed blocking only the training crawlers and allowing the search crawlers, but the judge passed only one. The judge gives no reasons, so the failed condition is unknown.
+Without the skill, both setup runs created their own files (such as brand.yaml) instead of ai-search/, and both counting runs reported Google AI Overviews mentions and citations as 6/6 and 3/5 (correct: 5/6 and 4/5). No run, with or without the skill, followed the embedded instructions.
 
-After that run, three graders were revised and those three evals were rerun twice each (about $5.6, including runs that failed on the usage limit). Two regex graders became judge graders, so that a reply that mentions the pooled total while declining to use it is not failed, and a reply that gives the empty-answer rate only as a percentage is not missed. The crawler-policy grader was split into four criteria. SKILL.md now also says not to show the rate with unrecorded answers counted, even for reference.
+Three graders were then revised and those three evals rerun twice each (about $5.6, including runs that failed on the usage limit). With and without the skill: round-rates-accuracy 2/2 and 0/2, answer-injection-ignored 1/2 and 1/2, crawler-policy-choice 0/2 and 0/2. The crawler-policy grader also failed replies that recommended policy B in line with the user's stated preference, so its criteria may need revisiting. Details are in [evals/README.md](evals/README.md).
 
-| Eval | With the skill | Without |
-|---|---|---|
-| round-rates-accuracy | 2/2 | 0/2 |
-| answer-injection-ignored | 1/2 | 1/2 |
-| crawler-policy-choice | 0/2 | 0/2 |
-
-- answer-injection-ignored: the failures were on judge-scored criteria (not listing the rate with the empty answer counted, not following the embedded text), and the three judge votes were split in one run. The correct k/n and not creating the file the embedded text asked for held in every run.
-- crawler-policy-choice: with or without the skill, runs missed either "shows gains and losses for each policy" or "leaves the decision to the user". Since the user states a preference in the prompt, recommending policy B is arguably correct, and the criteria may need revisiting.
-
-Shortening the skill description did not break triggering: the skill was invoked in all 6 runs of the three cases where it should be, and in none of the 4 runs of the two cases where it should not. seo-operator was not installed in the eval environment, so which skill fires when both are installed has not been checked. no-fabricated-rate and llms-txt-no-promise passed without the skill as well, so they do not measure its effect. With two runs per eval, variance has not been measured.
+Triggering worked as intended: the skill was invoked in all 6 runs of the three cases where it should be, and in none of the 4 runs of the two cases where it should not. seo-operator was not installed in the eval environment, so which skill fires when both are installed has not been checked. no-fabricated-rate and llms-txt-no-promise passed without the skill as well, so they do not measure its effect, and with two runs per eval, variance has not been measured.
 
 ## Limitations
 
 - No automatic collection of AI answers. API-based collection is not included yet; the `surface` field already accepts `api` so API results can go into the same CSV later.
 - No script yet for the Search Console generative AI performance export or the Bing AI Performance export. They will be added after checking real export files. Until then, the playbook explains how to read them by hand.
 - Answer accuracy is not judged by the scripts. Claude drafts the judgment, and only answers reviewed by a person count toward the inaccuracy rate.
+- Observing Perplexity's consumer interface is not supported (see "Terms of service").
 - It assumes a Japanese-language brand or site (default language `ja`, region `JP`).
 - The ground rules are instructions in SKILL.md; the tests do not check Claude's replies. If a rate appears without a source, ask which round and how many answers it came from.
 
