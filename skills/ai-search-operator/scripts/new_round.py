@@ -19,6 +19,8 @@ new_round.py - 観測ラウンドの回答ファイルのひな形を作る
     ファイルシステムでは同じファイル名になり、片方のファイルが作られないため
   - prompt に制御文字（NUL など。改行とタブは除く）がある
   - prompts.csv を CSV として読めない
+  - --mode、--region、--language に UTF-8 で書けない文字がある（UTF-8 でない端末から渡したバイトなど。
+    回答ファイルに書けないため、ファイルを1件も作らずに止める）
 
 出力:
   <ワークスペース>/answers/<ラウンド>/<サービス>/<プロンプトID>-<回数>.md
@@ -212,12 +214,33 @@ def _check_selected(prompts, selected):
     if control:
         raise InputError("prompts.csv の prompt に制御文字があります（NUL など。改行とタブは使えます）: {}".format(
             ", ".join(control)))
+    for pid in selected:
+        _check_utf8("prompts.csv の {} の prompt".format(pid), prompts[pid]["prompt"], hint="")
+
+
+# 引数に UTF-8 で書けない文字があるときの説明
+_ARG_ENCODING_HINT = "端末の文字コードが UTF-8 でないときや、別の文字コードの文を貼ったときに起きます"
+
+
+def _check_utf8(label, value, hint=_ARG_ENCODING_HINT):
+    # type: (str, str, str) -> None
+    """
+    value を UTF-8 で書けるかを確かめる。書けなければ InputError。
+    UTF-8 でない端末から渡したバイト（$'\\xff' など）は、Python の中で surrogate の文字（\\udcff）になり、
+    回答ファイルに書こうとした時点で失敗する。ファイルを作る前に止める。
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InputError("{} に UTF-8 で書けない文字があります{}: {!r}".format(
+            label, "（{}）".format(hint) if hint else "", value)) from None
 
 
 def _check_mode(mode):
     # type: (str) -> str
     """--mode の値を確かめ、前後の空白を除いて返す。誤りは InputError。"""
     mode = (mode or "").strip()
+    _check_utf8("--mode", mode)
     if _MODE_FORBIDDEN_RE.search(mode):
         raise InputError("--mode には「/」と制御文字を含めないでください（/ は compare_runs.py の primary_group の"
                          "区切りに使うため。モデル名を足すなら「検索あり・Think」のように ・ でつなぐ）: {!r}".format(mode))
@@ -254,6 +277,7 @@ def plan_round(prompts, round_name, services, repeats, prompt_ids,
     if login not in LOGINS:
         raise InputError("--login は {} のどれかにしてください: {}".format(" / ".join(LOGINS), login))
     for option, value in (("--region", region), ("--language", language)):
+        _check_utf8(option, value)
         if not _TOKEN_RE.fullmatch(value):
             raise InputError("{} には空白、#、制御文字を含めないでください: {!r}".format(option, value))
     mode = _check_mode(mode)
@@ -374,10 +398,12 @@ def write_round(workspace, plan):
             if diff:
                 differences.append((rel, diff))
             continue
-        text = build_answer(meta)
+        # ファイルを作る前にバイト列にする。UTF-8 で書けない文字があれば、ここで止まり、ファイルは残らない
+        # （plan_round で確かめているので、ここで止まるのは想定外のとき。終了コード 1 になる）
+        data = build_answer(meta).encode("utf-8")
         try:
             # "x" は、ファイルがあれば FileExistsError になる（確かめてから開くまでの間に作られても上書きしない）
-            f = open(path, "x", encoding="utf-8", newline="\n")
+            f = open(path, "xb")
         except FileExistsError:
             skipped += 1
             diff = compare_existing(path, meta)
@@ -387,13 +413,18 @@ def write_round(workspace, plan):
         except OSError as e:
             raise InputError("回答ファイル {} を作れません: {}（ここまでに {} 件作りました）".format(
                 path, _os_reason(e), created))
+        # 書きかけのファイルを残すと、次の実行で「既にある」とみなされ、利用者が消すまでひな形が作られない。
+        # そのため、どんな理由で止まっても消す
         try:
             with f:
-                f.write(text)
+                f.write(data)
         except OSError as e:
-            _remove_quietly(path)  # 書きかけのファイルを残すと、次の実行で「既にある」とみなされてしまう
+            _remove_quietly(path)
             raise InputError("回答ファイル {} を書けません: {}（書きかけのファイルは消しました。ここまでに {} 件作りました）".format(
                 path, _os_reason(e), created))
+        except BaseException:  # 想定外のエラーや Ctrl+C の中断でも消してから伝える
+            _remove_quietly(path)
+            raise
         created += 1
     return created, skipped, differences
 

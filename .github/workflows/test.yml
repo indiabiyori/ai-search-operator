@@ -12,7 +12,11 @@ permissions:
 jobs:
   test:
     name: Python ${{ matrix.python }}
-    runs-on: ubuntu-latest
+    # ubuntu-latest ではなく 24.04 に固定する。setup-python が使う Python 3.9 のビルド（最終版 3.9.25）は
+    # Ubuntu 22.04 と 24.04 の分しかなく、ubuntu-latest が 26.04 に移ると（2026年10〜11月）3.9 のジョブが
+    # テストの中身と関係なく落ちるため。22.04 はイメージの廃止が決まっているので選ばない。
+    # 24.04 も廃止されるときに、3.9 を動かす場所（コンテナなど）を決め直す
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

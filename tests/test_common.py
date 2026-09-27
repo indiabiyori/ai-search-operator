@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """ai_search_common.py のテスト。"""
 import codecs
+import contextlib
+import csv
+import io
 import os
 import shutil
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import helpers  # noqa: F401  （scripts を import できるようにする）
 
@@ -114,6 +119,85 @@ class CsvTest(TempDirCase):
         self.assertEqual(rows[0]["b"], "")
 
 
+class CsvNulTest(TempDirCase):
+    """
+    NUL（\\x00）の扱いを csv モジュールの版に任せない。Python 3.9 の csv.reader は NUL を含む行で csv.Error を
+    出し、3.11 以降は読む。書くときも読むときも NUL を除き、どちらの版でも同じ結果にする。
+    """
+
+    def test_write_csv_strips_nul(self):
+        p = os.path.join(self.tmp, "nul.csv")
+        common.write_csv(p, ["a\x00", "b"], [{"a\x00": "架空\x00珈琲", "b": "\x00=1+1"}])
+        with open(p, "rb") as f:
+            raw = f.read()
+        self.assertNotIn(b"\x00", raw)
+        fields, rows = common.read_csv(p)
+        self.assertEqual(fields, ["a", "b"])
+        self.assertEqual(rows, [{"a": "架空珈琲", "b": "=1+1"}])
+
+    def test_write_csv_stream_strips_nul_without_sanitize(self):
+        stream = io.StringIO()
+        common.write_csv_stream(stream, ["a"], [{"a": "x\x00y"}], sanitize=False)
+        self.assertEqual(stream.getvalue(), "a\r\nxy\r\n")
+
+    def test_read_csv_strips_nul_on_every_version(self):
+        data = "prompt_id,prompt,intent_group\r\nP001,架空珈琲の\x00豆,浅煎り\x00\r\n\x00\r\n".encode("utf-8")
+        p = self.write_bytes("p.csv", data)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            fields, rows = common.read_csv(p)
+        self.assertEqual(fields, ["prompt_id", "prompt", "intent_group"])
+        self.assertEqual(rows, [{"prompt_id": "P001", "prompt": "架空珈琲の豆", "intent_group": "浅煎り"}])
+        self.assertIn("NUL", err.getvalue())
+
+    def test_read_csv_without_nul_does_not_warn(self):
+        p = self.write_bytes("ok.csv", b"a,b\r\n1,2\r\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            common.read_csv(p)
+        self.assertEqual(err.getvalue(), "")
+
+
+class CsvFieldSizeTest(TempDirCase):
+    """write_csv が書けた長いセルを、read_csv が csv の既定の上限（131072 文字）で拒まない。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.saved = csv.field_size_limit()
+        csv.field_size_limit(131072)  # ほかのテストが上げていても、既定の上限から始める
+
+    def tearDown(self):
+        csv.field_size_limit(self.saved)
+        TempDirCase.tearDown(self)
+
+    def test_long_cell_round_trip(self):
+        long_value = "|".join("https://kakuu-coffee.example/page/{:05d}".format(i) for i in range(5000))
+        self.assertGreater(len(long_value), 131072)
+        p = os.path.join(self.tmp, "long.csv")
+        common.write_csv(p, ["own_cited_urls"], [{"own_cited_urls": long_value}])
+        _, rows = common.read_csv(p)
+        self.assertEqual(rows[0]["own_cited_urls"], long_value)
+
+    def test_field_size_limit_falls_back_when_sys_maxsize_overflows(self):
+        # Windows では C の long が 32 ビットなので、sys.maxsize を渡すと OverflowError になる
+        real = csv.field_size_limit
+        tried = []
+
+        def fake(*args):
+            if args:
+                tried.append(args[0])
+                if args[0] > 2 ** 31 - 1:
+                    raise OverflowError("Python int too large to convert to C long")
+            return real(*args)
+
+        with mock.patch.object(common.csv, "field_size_limit", side_effect=fake):
+            common.raise_csv_field_size_limit()
+        self.assertEqual(tried[0], sys.maxsize)
+        limit = csv.field_size_limit()
+        self.assertLessEqual(limit, 2 ** 31 - 1)
+        self.assertGreaterEqual(limit, 16 * 1024 * 1024)
+
+
 class FrontMatterTest(unittest.TestCase):
     def test_basic(self):
         text = "---\nround: R1\nsurface: web   # 画面\nmode: C# モード\nempty:\nKey: v\n---\n## 回答\n本文\n"
@@ -188,6 +272,84 @@ class EntitiesTest(TempDirCase):
             p = self.write(body)
             with self.assertRaises(common.InputError, msg=body):
                 common.load_entities(p)
+
+    def test_idn_domains_in_either_form_collide(self):
+        # 日本語ドメインの Unicode 表記と Punycode 表記は同じドメイン。自社と競合に分けて書けば入力の誤り
+        p = self.write("own-company,own,架空珈琲,架空珈琲,,架空珈琲.jp\n"
+                       "comp-a,competitor,他社,他社,,xn--6tvq2ydjak8s.jp\n")
+        with self.assertRaises(common.InputError) as cm:
+            common.load_entities(p)
+        self.assertIn("xn--6tvq2ydjak8s.jp", str(cm.exception))
+
+    def test_domains_are_stored_in_ascii(self):
+        p = self.write("own-company,own,架空珈琲,架空珈琲,,ｗｗｗ．架空珈琲．ｊｐ|ＫＡＫＵＵ-coffee.example\n")
+        self.assertEqual(common.load_entities(p)[0]["domains"], ["xn--6tvq2ydjak8s.jp", "kakuu-coffee.example"])
+
+
+class NormalizeDomainTest(unittest.TestCase):
+    """entities.csv のドメイン。NFKC と小文字にそろえ、ラベルごとに IDNA（ASCII）に変換してから形を確かめる。"""
+
+    def norm(self, value):
+        return common.normalize_domain(value, "entities.csv の 2 行目")
+
+    def test_normalized_forms(self):
+        cases = (
+            ("kakuu-coffee.example", "kakuu-coffee.example"),
+            ("www.Kakuu-Coffee.example.", "kakuu-coffee.example"),
+            ("ｋａｋｕｕ-coffee．example", "kakuu-coffee.example"),  # 全角の英字と点
+            ("　kakuu-coffee.example　", "kakuu-coffee.example"),  # 全角の空白
+            ("架空珈琲.jp", "xn--6tvq2ydjak8s.jp"),
+            ("www.架空珈琲.jp", "xn--6tvq2ydjak8s.jp"),
+            ("架空珈琲。jp", "xn--6tvq2ydjak8s.jp"),  # 日本語入力の句点
+            ("kakuu-coffee.example。", "kakuu-coffee.example"),
+            ("XN--6TVQ2YDJAK8S.JP", "xn--6tvq2ydjak8s.jp"),
+            ("shop.架空珈琲.jp", "shop.xn--6tvq2ydjak8s.jp"),
+            ("www.example", "www.example"),  # 外すと1つのラベルだけになる www. は残す
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(self.norm(value), expected)
+
+    def test_invalid_forms_raise_with_reason(self):
+        cases = (
+            ("*.indiabiyori.jp", "ワイルドカード"),
+            (".indiabiyori.jp", "先頭の ."),
+            ("indiabiyori.jp:443", "ポート"),
+            ("indiabiyori..jp", "空のラベル"),
+            ("indiabiyori.jp,shop.indiabiyori.jp", "| で区切って"),
+            ("indiabiyori.jp、shop.indiabiyori.jp", "| で区切って"),
+            ("indiabiyori jp", "空白"),
+            ("https://indiabiyori.jp", "スキームやパス"),
+            ("indiabiyori.jp/menu", "スキームやパス"),
+            ("localhost", "ドメインの形"),
+            ("-indiabiyori.jp", "ドメインの形"),
+            ("a" * 64 + ".jp", "63 文字"),
+            (".", "ドメインの形"),
+        )
+        for value, reason in cases:
+            with self.subTest(value=value):
+                with self.assertRaises(common.InputError) as cm:
+                    self.norm(value)
+                message = str(cm.exception)
+                self.assertIn(reason, message)
+                self.assertIn("entities.csv の 2 行目", message)
+                self.assertIn(value, message)
+
+
+class AsciiHostTest(unittest.TestCase):
+    """URL のホストを、entities.csv のドメインと同じ ASCII（Punycode）の形にそろえる。"""
+
+    def test_ascii_host(self):
+        self.assertEqual(common.ascii_host("架空珈琲.jp"), "xn--6tvq2ydjak8s.jp")
+        self.assertEqual(common.ascii_host("WWW.架空珈琲.JP."), "www.xn--6tvq2ydjak8s.jp")
+        self.assertEqual(common.ascii_host("xn--6tvq2ydjak8s.jp"), "xn--6tvq2ydjak8s.jp")
+        self.assertEqual(common.ascii_host("Kakuu-Coffee.example"), "kakuu-coffee.example")
+        self.assertEqual(common.ascii_host("::1"), "::1")
+
+    def test_unconvertible_host_is_returned_lowercased(self):
+        self.assertEqual(common.ascii_host("A..b"), "a..b")
+        self.assertEqual(common.ascii_host("a" * 64 + ".example"), "a" * 64 + ".example")
+        self.assertEqual(common.ascii_host(""), "")
 
 
 class PromptsTest(TempDirCase):

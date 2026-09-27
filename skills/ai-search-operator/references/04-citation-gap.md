@@ -71,7 +71,7 @@ citations.csv（1行＝1出典）の列:
 | service, surface, login, mode | 組の一部 | region と language の列はない。組で分けるときは answer_file で observations.csv とつなぐ |
 | location | `sources`（出典の欄）か `body`（回答の本文中のリンク） | body の行には source_order がない |
 | source_order | 出典の欄での並び順 | 画面の表示順で、重要度や順位を表すとは限らない |
-| url, host | 追跡用のパラメータを外した URL と、そのホスト | 同じ回答の中の同じ URL は1行にまとめてある |
+| url, host | 追跡用のパラメータを外した URL と、そのホスト。host は日本語のドメインでも Punycode（`xn--`）の表記 | 同じ回答の中の同じ URL は1行にまとめてあり、url には最初に出た書き方が入る。ホストの日本語と Punycode の表記、パスの日本語と `%XX` の表記の違いだけなら同じ URL とみなす |
 | entity_id, entity_kind | 一致した entities.csv の行と、`own` / `competitor` / `other` / `unresolved` | other は entities.csv にないホスト。unresolved はリダイレクト用の URL や短縮 URL で、行き先がわからないもの |
 
 citations.csv には、分母に入れない回答（valid_citation が 0）の出典も入りうる。数えるときは answer_file で observations.csv とつなぎ、valid_citation が 1 の回答の行だけを使う。

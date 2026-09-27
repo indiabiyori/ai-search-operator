@@ -23,6 +23,8 @@ ai_robots_check.py - AI クローラーごとに、robots.txt で許可されて
 
 出力（Markdown か CSV）の列: operator, token, category, path, verdict, matched_group, matched_rule, note
   verdict は 許可 / 拒否 / 全許可（robots.txt なし） / 全拒否（取得できず） / 不定（429）。
+  標準出力には、標準出力の文字コードによらず UTF-8 で書く（Windows の cp932 にない文字で落ちないため）。
+  -o の出力先が --file・--crawlers のファイルと同じなら、入力を上書きせずに入力の誤りにする。
 
 判定の決まり:
   - User-agent の照合は大文字・小文字を区別しない。トークンに一致するグループが複数あれば規則を合わせる。
@@ -36,6 +38,7 @@ ai_robots_check.py - AI クローラーごとに、robots.txt で許可されて
     そのパスを許可されているときは、その旨を note に注記する（SEARCH_FALLBACK_TOKENS）。
   - パスの照合は最長一致で、同じ長さなら Allow を優先する。* と末尾の $ に対応する。/robots.txt は常に許可。
   - 取得の結果ごとの扱い（--url）:
+      1xx の中間の応答（100 Continue、103 Early Hints など。101 を除く）: 読み飛ばし、その後の最終の応答で判定する。
       2xx: 解釈する。
       3xx: 5回までたどる。5回を超えたら RFC 9309 2.3.1.2 に従い、robots.txt がない（unavailable、2.3.1.3）
            ものとして全許可にする。Google も 404 として扱う。Location のない 3xx と、http / https 以外への
@@ -44,8 +47,14 @@ ai_robots_check.py - AI クローラーごとに、robots.txt で許可されて
       429: RFC 9309 では 4xx の一つとして全許可だが、Google はサーバーエラーとして扱いクロールを止める。
            判定は「不定（429）」とし、両方の扱いを注記する。
       5xx、タイムアウト、接続エラー、TLS のエラー: RFC 9309 に従って全拒否。各社の実際の扱いは異なりうる。
-      最初の URL のホスト名が名前解決で見つからない（EAI_NONAME）: 打ち間違いの可能性が高いので、判定の表を出さず
-      入力の誤り（終了コード 2）にする。一時的な失敗とリダイレクト先の失敗は、取得できなかったもの（全拒否）とする。
+        --timeout は接続や1回の読み込みを待つ秒数。少しずつ送り続けるサーバーでも止まるよう、取得全体（名前解決と
+        リダイレクトを含む）を --timeout の 3 倍か 30 秒の長いほうで打ち切り、タイムアウトとして全拒否にする。
+      最初の URL のホスト名が名前解決で見つからない（EAI_NONAME）か、名前はあるがアドレスがない（EAI_NODATA）:
+      打ち間違いの可能性が高いので、判定の表を出さず入力の誤り（終了コード 2）にする。ホスト名の形の誤り（空の
+      ラベル、63 文字を超えるラベルなど）も同じ。一時的な失敗とリダイレクト先の失敗は、取得できなかったもの（全拒否）とする。
+  - 非 ASCII のホスト名は、Python 標準の idna コーデック（IDNA 2003）で Punycode（xn--）の表記にする。IDNA 2008
+    （ブラウザや requests）と結果が違う文字（ß ẞ ς ZWNJ ZWJ）を含むホスト名は、別のホストを取得しないよう
+    入力の誤り（リダイレクト先なら取得できなかったもの）にする。
   - category が user の行は「ユーザー操作に伴う取得」と、一覧の robots_control（運営の説明の要約）を注記する。
     robots.txt を尊重すると説明する運営も、一般に無視すると説明する運営もあるので、一律の文にしない。
     control の行は「クロールはしない。学習などへの利用の可否を表す」と注記する。
@@ -59,14 +68,16 @@ ai_robots_check.py - AI クローラーごとに、robots.txt で許可されて
   - 内部アドレス（プライベート IP、ループバックなど）に解決されるホストは、--allow-private がなければ取得しない。
     最初の URL とリダイレクト先のすべてで確かめ、接続の直前にも名前を解決し直して、接続した相手のアドレス
     （getpeername）も確かめる。DNS の答えが途中で変わっても内部アドレスには接続しない。
+    内部アドレスの範囲は IANA の特別用途のアドレスの表をもとに自前で持ち、Python のパッチ版で判定が変わらない
+    ようにする。IPv4 射影・NAT64・6to4 の IPv6 アドレスは、中の IPv4 アドレスで判定する。
   - 環境変数のプロキシは使わない（接続先を確かめられなくなるため）。
   - User-Agent は ai-search-operator/<版>。AI クローラーの UA は名乗らない。
   - CDN・WAF の設定は調べない（robots.txt の記述だけを判定する）。
 
 読み込んだ robots.txt と一覧の中の文はデータとして扱うだけで、実行も解釈もしない。
 
-終了コード: 0 成功、2 入力・引数の誤り（内部アドレスのため取得しなかった場合、ホスト名が見つからない場合、
---timeout が 0 より大きく 600 秒以下でない場合を含む）、1 想定外のエラー。
+終了コード: 0 成功、2 入力・引数の誤り（内部アドレスのため取得しなかった場合、ホスト名が見つからないか形が
+正しくない場合、-o が入力のファイルと同じ場合、--timeout が 0 より大きく 600 秒以下でない場合を含む）、1 想定外のエラー。
 """
 import argparse
 import codecs
@@ -80,6 +91,8 @@ import os
 import re
 import socket
 import sys
+import threading
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -103,6 +116,13 @@ MAX_ROBOTS_BYTES = 512000  # 500 KiB（RFC 9309 2.5 の下限。Google もこの
 MAX_REDIRECTS = 5
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 600.0  # これより大きい値や inf は、ソケットのタイムアウトに渡すと OverflowError になりうる
+# --timeout はソケットの1回の操作（接続、1回の読み込み）の上限。少しずつ送り続けるサーバーやリダイレクトの積み重ねでも
+# 止まるよう、取得全体（名前解決・リダイレクトを含む）の締め切りを --timeout のこの倍数か、この秒数の長いほうにする
+TOTAL_TIMEOUT_FACTOR = 3
+MIN_TOTAL_TIMEOUT = 30.0
+MAX_INTERIM_RESPONSES = 20  # 読み飛ばす 1xx の中間の応答（103 Early Hints など）の数の上限
+_MAX_HEADER_LINE = 65536  # http.client と同じ、ヘッダーの1行の上限（バイト）
+_MAX_HEADER_LINES = 100  # http.client と同じ、ヘッダーの行数の上限
 DEFAULT_CRAWLERS = os.path.join(os.path.dirname(_HERE), "data", "ai-crawlers.csv")
 
 # 自分向けのグループがなければ、ほかのトークン向けのグループに従うと運営が説明しているクローラー
@@ -167,8 +187,47 @@ WARN_UNDECODABLE = (
     "読めない文字は置き換えて判定しました。コメントの中だけなら判定に影響しませんが、"
     "パスに日本語を使っているなら UTF-8 で保存し直してください")
 
-_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")  # 共有アドレス空間（RFC 6598）
-_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+DETAIL_DEADLINE = "タイムアウト（取得全体で {:g} 秒を超えた。名前解決とリダイレクトを含む）"
+
+# 内部アドレスとみなす範囲。IANA の特別用途のアドレスの表（IPv4 / IPv6 Special-Purpose Address Registry）のうち
+# 公開のウェブサーバーが使わない範囲と、マルチキャスト・予約済みの範囲。ipaddress の is_private の表は Python の
+# パッチ版で改められた（CVE-2024-4032 の修正。3.9.20・3.10.15・3.11.10・3.12.4 から）ので、古い版（macOS の
+# /usr/bin/python3 の 3.9.6 など）でも同じ判定になるよう、自前で持つ。新しい版の is_private の表はすべてここに含まれる。
+# IANA が世界から届くとする一部のエニーキャスト（192.0.0.9、2001:1::1 など）も robots.txt の取得先ではないので含める
+_INTERNAL_NETWORKS_V4 = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8",  # このネットワーク（RFC 791）
+    "10.0.0.0/8",  # プライベート（RFC 1918）
+    "100.64.0.0/10",  # 共有アドレス空間（RFC 6598）
+    "127.0.0.0/8",  # ループバック
+    "169.254.0.0/16",  # リンクローカル
+    "172.16.0.0/12",  # プライベート（RFC 1918）
+    "192.0.0.0/24",  # IETF のプロトコルの割り当て（RFC 6890）
+    "192.0.2.0/24",  # 文書用（TEST-NET-1）
+    "192.88.99.0/24",  # 6to4 のリレーのエニーキャスト（RFC 7526 で廃止）
+    "192.168.0.0/16",  # プライベート（RFC 1918）
+    "198.18.0.0/15",  # ベンチマーク用（RFC 2544）
+    "198.51.100.0/24",  # 文書用（TEST-NET-2）
+    "203.0.113.0/24",  # 文書用（TEST-NET-3）
+    "224.0.0.0/4",  # マルチキャスト
+    "240.0.0.0/4",  # 予約済み（255.255.255.255 のブロードキャストを含む）
+))
+_INTERNAL_NETWORKS_V6 = tuple(ipaddress.ip_network(n) for n in (
+    "::/8",  # 予約済み。未指定（::）、ループバック（::1）、IPv4 互換（廃止）、ローカルの変換用の 64:ff9b:1::/48 を含む
+    "100::/64",  # 破棄専用（RFC 6666）
+    "2001::/23",  # IETF のプロトコルの割り当て（Teredo、ベンチマーク用、ORCHID など）
+    "2001:db8::/32",  # 文書用
+    "3fff::/20",  # 文書用（RFC 9637）
+    "5f00::/16",  # SRv6 の SID（RFC 9602）
+    "fc00::/7",  # ユニークローカル
+    "fe80::/10",  # リンクローカル
+    "fec0::/10",  # サイトローカル（廃止）
+    "ff00::/8",  # マルチキャスト
+))
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")  # 中の IPv4 アドレスで判定する
+_SIXTOFOUR_PREFIX = ipaddress.ip_network("2002::/16")  # 6to4。中の IPv4 アドレスで判定する
+# IDNA 2003（Python 標準の idna コーデック）と IDNA 2008（UTS 46 の非互換処理。requests やブラウザ）で変換の結果が
+# 違う文字（deviation）。IDNA 2003 では faß.de が fass.de になり、別のホストを取得してしまう
+_IDNA_DEVIATIONS = frozenset("\u00df\u1e9e\u03c2\u200c\u200d")  # ß ẞ ς ZWNJ ZWJ
 _SCHEME_AUTHORITY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^/?#]*")
 _HOST_RE = re.compile(r"^[a-z0-9_.-]+$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -361,9 +420,11 @@ def select_robots_rules(groups, tokens):
 def internal_address(address):
     # type: (str) -> bool
     """
-    内部アドレスなら True。プライベート（100.64.0.0/10 の共有アドレスを含む）・ループバック・リンクローカル・
-    予約済み・マルチキャスト・未指定と、IPv6 のサイトローカル。IPv4 射影の IPv6（::ffff:0:0/96）と
-    NAT64（64:ff9b::/96）のアドレスは、中の IPv4 アドレスで判定する。解釈できない値は内部とみなす。
+    内部アドレスなら True。判定は自前の表（_INTERNAL_NETWORKS_V4 / _V6。プライベート、共有アドレス、ループバック、
+    リンクローカル、文書用、IETF のプロトコルの割り当て、マルチキャスト、予約済みなど）で行い、Python のパッチ版に
+    よらず同じ結果にする。IPv4 射影の IPv6（::ffff:0:0/96）、NAT64（64:ff9b::/96）、6to4（2002::/16）のアドレスは、
+    中の IPv4 アドレスで判定する。解釈できない値は内部とみなす。
+    移植元からの変更: 自前の表と 6to4 の扱いを足した（移植元は ipaddress の is_private などだけに頼っていた）。
     """
     try:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
@@ -374,8 +435,12 @@ def internal_address(address):
             ip = ip.ipv4_mapped
         elif ip in _NAT64_PREFIX:
             ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-    if ip.version == 4 and ip in _SHARED_ADDRESS_SPACE:
+        elif ip in _SIXTOFOUR_PREFIX:
+            ip = ip.sixtofour
+    networks = _INTERNAL_NETWORKS_V4 if ip.version == 4 else _INTERNAL_NETWORKS_V6
+    if any(ip in network for network in networks):
         return True
+    # 念のため ipaddress の判定も使う。新しい版の表は上の表に含まれるので、これで版による差は出ない
     return (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast
             or ip.is_unspecified or (ip.version == 6 and ip.is_site_local))
 
@@ -410,14 +475,116 @@ def _check_peer(sock, host):
         raise PrivateAddressBlocked(_blocked_message("接続先", host, peer))
 
 
-def _guarded_create_connection(address, allow_private, *args, **kwargs):
-    # type: (tuple, bool, object, object) -> socket.socket
+class _DeadlineExceeded(socket.timeout):
+    """取得全体の締め切りを過ぎた。socket.timeout（OSError）の一種なので、ほかの接続のエラーと同じ経路で扱える。"""
+
+
+class _Deadline(object):
+    """
+    取得全体（名前解決・接続・読み込み・リダイレクトを含む）の締め切り。--timeout はソケットの1回の操作ごとの
+    上限でしかないので、少しずつ送り続けるサーバーが相手だと、それだけでは止まらない。締め切りになったら、
+    つないでいるソケットを別のスレッド（threading.Timer）から shutdown して、読み込みを止める。
+    ソケットは fd で覚える（HTTPS では、TLS の層が同じ fd を使う）。名前解決（getaddrinfo）は途中で止められないので、
+    終わってから締め切りを確かめる。
+    """
+
+    def __init__(self, seconds):
+        # type: (float) -> None
+        self.seconds = seconds
+        self.expired = False
+        self._end = time.monotonic() + seconds
+        self._lock = threading.Lock()
+        self._sockets = []  # type: list  # (fd, family, type)
+        self._timer = threading.Timer(seconds, self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def remaining(self):
+        # type: () -> float
+        return self._end - time.monotonic()
+
+    def passed(self):
+        # type: () -> bool
+        return self.expired or self.remaining() <= 0
+
+    def check(self):
+        # type: () -> None
+        if self.passed():
+            raise _DeadlineExceeded("取得全体の締め切り（{:g} 秒）を過ぎた".format(self.seconds))
+
+    def op_timeout(self, timeout):
+        # type: (object) -> float
+        """1回の操作のタイムアウト。締め切りまでの残りを超えない。締め切りを過ぎていれば _DeadlineExceeded。"""
+        self.check()
+        left = self.remaining()
+        if isinstance(timeout, (int, float)):
+            left = min(timeout, left)
+        return max(left, 0.001)  # 負の値はソケットに渡せない
+
+    def watch(self, sock):
+        # type: (socket.socket) -> socket.socket
+        """締め切りで止めるソケットとして覚える。すでに締め切りを過ぎていれば、閉じて _DeadlineExceeded。"""
+        with self._lock:
+            if not self.expired:
+                self._sockets.append((sock.fileno(), sock.family, sock.type))
+                return sock
+        sock.close()
+        raise _DeadlineExceeded("取得全体の締め切り（{:g} 秒）を過ぎた".format(self.seconds))
+
+    def release(self):
+        # type: () -> bool
+        """
+        覚えたソケットを手放す（ソケットを閉じる前に呼ぶ。閉じた fd を別のスレッドから触らないため）。
+        締め切りで読み込みを止めていたら True（読んだ内容は途中までかもしれない）。
+        """
+        with self._lock:
+            self._sockets = []
+            return self.expired
+
+    def cancel(self):
+        # type: () -> None
+        self._timer.cancel()
+        self.release()
+
+    def _expire(self):
+        # type: () -> None
+        with self._lock:
+            self.expired = True
+            for fd, family, kind in self._sockets:
+                try:
+                    dup = socket.fromfd(fd, family, kind)  # fd を複製するので、閉じても元の fd は閉じない
+                except (OSError, ValueError, AttributeError):  # 閉じ終えた fd など。このスレッドの例外は外に出さない
+                    continue
+                try:
+                    dup.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                finally:
+                    dup.close()
+            self._sockets = []
+
+
+def total_timeout(timeout):
+    # type: (float) -> float
+    """取得全体の締め切り（秒）。--timeout の TOTAL_TIMEOUT_FACTOR 倍か MIN_TOTAL_TIMEOUT の長いほう。"""
+    return max(timeout * TOTAL_TIMEOUT_FACTOR, MIN_TOTAL_TIMEOUT)
+
+
+def _guarded_create_connection(address, allow_private, timeout, source_address=None, deadline=None):
+    # type: (tuple, bool, object, object, object) -> socket.socket
     """
     socket.create_connection の代わり。接続の直前に名前を解決し直し、内部アドレスがあれば接続しない。
     解決したアドレスに直接つなぎ、つないだ相手のアドレスも確かめる（DNS の答えが途中で変わる場合への対策）。
+    deadline（_Deadline）があれば、接続の試行ごとのタイムアウトを締め切りまでの残りに収め、
+    つないだソケットを締め切りで止める対象にする。
     """
+    if deadline is not None:
+        per_try = deadline.op_timeout(timeout)
+    else:
+        per_try = timeout
     if allow_private:
-        return socket.create_connection(address, *args, **kwargs)
+        sock = socket.create_connection(address, per_try, source_address)
+        return deadline.watch(sock) if deadline is not None else sock
     host, port = address[0], address[1]
     bare = host.strip("[]")
     addresses = resolve_addresses(bare, port)
@@ -426,49 +593,88 @@ def _guarded_create_connection(address, allow_private, *args, **kwargs):
             raise PrivateAddressBlocked(_blocked_message("接続の直前の名前解決で、接続先", bare, resolved))
     error = None
     for resolved in addresses:
+        if deadline is not None:
+            per_try = deadline.op_timeout(timeout)  # 名前解決と前の試行に使った時間を差し引く
         try:
-            sock = socket.create_connection((resolved, port), *args, **kwargs)
+            sock = socket.create_connection((resolved, port), per_try, source_address)
         except OSError as exc:
             error = exc
             continue
         _check_peer(sock, bare)
-        return sock
+        return deadline.watch(sock) if deadline is not None else sock
     raise error or OSError("名前解決の結果が空です: {}".format(bare))
+
+
+class TooManyInterimResponses(http.client.HTTPException):
+    """1xx の中間の応答が MAX_INTERIM_RESPONSES 個を超えた。"""
+
+
+class _FinalResponse(http.client.HTTPResponse):
+    """
+    100 以外の 1xx（102 Processing、103 Early Hints など）の中間の応答も読み飛ばし、最終の応答を読む。
+    http.client が読み飛ばすのは 100 Continue だけで、103 の後の 200 を 103 として返してしまうため。
+    101（プロトコルの切り替え）は最終の応答なので読み飛ばさない。
+    """
+
+    def _read_status(self):
+        for _ in range(MAX_INTERIM_RESPONSES + 1):
+            version, status, reason = http.client.HTTPResponse._read_status(self)
+            if not 100 <= status < 200 or status == 101:
+                return version, status, reason
+            self._skip_interim_headers()
+        raise TooManyInterimResponses(MAX_INTERIM_RESPONSES)
+
+    def _skip_interim_headers(self):
+        # type: () -> None
+        """中間の応答のヘッダーを空行まで読み捨てる（行の長さと行数の上限は http.client と同じ）。"""
+        for _ in range(_MAX_HEADER_LINES + 1):
+            line = self.fp.readline(_MAX_HEADER_LINE + 1)
+            if len(line) > _MAX_HEADER_LINE:
+                raise http.client.LineTooLong("header line")
+            if line in (b"\r\n", b"\n", b""):
+                return
+        raise http.client.HTTPException("中間の応答のヘッダーが多すぎる")
 
 
 class _GuardMixin(object):
     """
     HTTPConnection / HTTPSConnection のサブクラスに混ぜる。ソケットを作る関数を差し替え、TCP の接続の前後で
-    接続先のアドレスを確かめる（HTTPS では TLS の前に確かめる）。
+    接続先のアドレスを確かめる（HTTPS では TLS の前に確かめる）。応答は _FinalResponse で読む。
     """
 
-    def _install_guard(self, allow_private):
-        # type: (bool) -> None
+    response_class = _FinalResponse
+
+    def _install_guard(self, allow_private, deadline):
+        # type: (bool, object) -> None
         self._allow_private = allow_private
+        self._deadline = deadline
         self._create_connection = self._guarded_create
 
-    def _guarded_create(self, address, *args, **kwargs):
-        return _guarded_create_connection(address, self._allow_private, *args, **kwargs)
+    def _guarded_create(self, address, timeout, source_address=None):
+        return _guarded_create_connection(address, self._allow_private, timeout, source_address, self._deadline)
 
 
 class _GuardedHTTPConnection(_GuardMixin, http.client.HTTPConnection):
     def __init__(self, *args, **kwargs):
         allow_private = kwargs.pop("allow_private", False)
+        deadline = kwargs.pop("deadline", None)
         http.client.HTTPConnection.__init__(self, *args, **kwargs)
-        self._install_guard(allow_private)
+        self._install_guard(allow_private, deadline)
 
 
 class _GuardedHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, allow_private):
-        # type: (bool) -> None
+    def __init__(self, allow_private, deadline=None):
+        # type: (bool, object) -> None
         urllib.request.HTTPHandler.__init__(self)
         self._allow_private = allow_private
+        self._deadline = deadline
 
     def http_open(self, req):
         allow = self._allow_private
+        deadline = self._deadline
 
         def connection(host, **kwargs):
-            return _GuardedHTTPConnection(host, allow_private=allow, **kwargs)
+            return _GuardedHTTPConnection(host, allow_private=allow, deadline=deadline, **kwargs)
 
         return self.do_open(connection, req)
 
@@ -477,35 +683,39 @@ if _HAS_HTTPS:
     class _GuardedHTTPSConnection(_GuardMixin, http.client.HTTPSConnection):
         def __init__(self, *args, **kwargs):
             allow_private = kwargs.pop("allow_private", False)
+            deadline = kwargs.pop("deadline", None)
             http.client.HTTPSConnection.__init__(self, *args, **kwargs)
-            self._install_guard(allow_private)
+            self._install_guard(allow_private, deadline)
 
     class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
-        def __init__(self, allow_private):
-            # type: (bool) -> None
+        def __init__(self, allow_private, deadline=None):
+            # type: (bool, object) -> None
             urllib.request.HTTPSHandler.__init__(self)
             self._allow_private = allow_private
+            self._deadline = deadline
 
         def https_open(self, req):
             allow = self._allow_private
+            deadline = self._deadline
 
             def connection(host, **kwargs):
-                return _GuardedHTTPSConnection(host, allow_private=allow, **kwargs)
+                return _GuardedHTTPSConnection(host, allow_private=allow, deadline=deadline, **kwargs)
 
             return self.do_open(connection, req, context=self._context)
 
 
-def _build_opener(allow_private):
-    # type: (bool) -> urllib.request.OpenerDirector
+def _build_opener(allow_private, deadline=None):
+    # type: (bool, object) -> urllib.request.OpenerDirector
     """
     取得に使う opener。環境変数のプロキシを使わない（ProxyHandler({})）。リダイレクトは自前でたどるので
     HTTPRedirectHandler を入れず、4xx・5xx も例外にしないよう HTTPErrorProcessor も入れない。
+    deadline（_Deadline）があれば、つないだソケットを取得全体の締め切りで止める。
     """
     opener = urllib.request.OpenerDirector()
     opener.add_handler(urllib.request.ProxyHandler({}))
-    opener.add_handler(_GuardedHTTPHandler(allow_private))
+    opener.add_handler(_GuardedHTTPHandler(allow_private, deadline))
     if _HAS_HTTPS:
-        opener.add_handler(_GuardedHTTPSHandler(allow_private))
+        opener.add_handler(_GuardedHTTPSHandler(allow_private, deadline))
     return opener
 
 
@@ -524,9 +734,42 @@ def _url_suffix(text):
     return ": " + text
 
 
+def _host_shape_problem(host):
+    # type: (str) -> str
+    """
+    ASCII の表記のホスト名の形の誤りの説明（なければ空）。空のラベル（連続した . や先頭の .）、63 文字を超える
+    ラベル、全体で 253 文字を超えるホスト名。末尾の . が1つだけなら有効な FQDN として通す。
+    これらは名前解決（getaddrinfo の IDNA の変換）で UnicodeError になり、以前は全拒否（取得できず）になっていた。
+    """
+    name = host[:-1] if host.endswith(".") else host
+    labels = name.split(".")
+    if not name or any(not label for label in labels):
+        return "空のラベル（連続した . か、先頭か末尾の余分な .）があります"
+    if any(len(label) > 63 for label in labels):
+        return "63 文字を超えるラベルがあります"
+    if len(name) > 253:
+        return "全体で 253 文字を超えています"
+    return ""
+
+
+def _has_idna_deviation(host_text):
+    # type: (str) -> bool
+    """
+    ホスト名に IDNA 2003 と IDNA 2008 で変換の結果が違う文字（_IDNA_DEVIATIONS）があるか。
+    urlsplit の hostname は小文字にしてあるので（ẞ が ß になる）、大文字・小文字をそろえる前の文字列で調べる。
+    """
+    return any(ch in _IDNA_DEVIATIONS for ch in host_text)
+
+
 def origin_of(url):
     # type: (str) -> str
-    """URL から scheme://host[:port] を取り出す。http / https 以外、userinfo 付き、ホストのない URL は InputError。"""
+    """
+    URL から scheme://host[:port] を取り出す。http / https 以外、userinfo 付き、ホストのない URL、形の誤った
+    ホスト名（空のラベル、63 文字を超えるラベルなど）は InputError。
+    非 ASCII のホスト名は、Python 標準の idna コーデック（IDNA 2003）で Punycode（xn--）の表記にする。
+    IDNA 2008 と結果が違う文字（ß ẞ ς ZWNJ ZWJ）を含むホスト名は、別のホスト（faß.de なら fass.de）を黙って
+    取得しないよう InputError にする。
+    """
     text = (url or "").strip()
     try:
         parts = urlsplit(text)
@@ -546,6 +789,12 @@ def origin_of(url):
     if not host:
         raise InputError("URL にホスト名がありません{}".format(_url_suffix(text)))
     if not host.isascii():
+        if _has_idna_deviation(parts.netloc):
+            raise InputError("ホスト名に、IDNA 2003 と IDNA 2008 で変換の結果が違う文字（ß ẞ ς ZWNJ ZWJ）があるため"
+                             "取得しません（このスクリプトの変換は IDNA 2003 で、別のホストの robots.txt を取得してしまう"
+                             "おそれがあります）。Punycode（xn--）の表記で指定してください{}".format(_url_suffix(text)))
+        # 変換は Python 標準の idna コーデック（IDNA 2003）で行う。上の文字のほかは、IDNA 2008 と同じ結果になるか、
+        # IDNA 2008 では使えない文字（その場合はブラウザでも開けないホスト名）
         try:
             host = host.encode("idna").decode("ascii")
         except UnicodeError:
@@ -559,6 +808,9 @@ def origin_of(url):
     else:
         if not _HOST_RE.match(host):
             raise InputError("ホスト名に使えない文字があります{}".format(_url_suffix(text)))
+        problem = _host_shape_problem(host)
+        if problem:
+            raise InputError("ホスト名の形が正しくありません（{}）{}".format(problem, _url_suffix(text)))
         netloc = host
     if port is not None:
         netloc += ":{}".format(port)
@@ -585,8 +837,9 @@ def _redirect_target(base, location):
     """
     リダイレクト先の URL と、たどれないときの理由を返す。http.client はヘッダーを latin-1 で読むので、
     UTF-8 のまま送られた Location（日本語のパスなど）は UTF-8 として読み直す（requests と同じ扱い）。
-    UTF-8 として読めなければ latin-1 の文字のままにする。非 ASCII のホスト名は IDNA の表記に、
+    UTF-8 として読めなければ latin-1 の文字のままにする。非 ASCII のホスト名は IDNA の表記（IDNA 2003）に、
     パスとクエリの非 ASCII の文字は UTF-8 の %XX にする。フラグメントは外す。
+    IDNA 2003 と 2008 で変換の結果が違う文字を含むホスト名と、形の誤ったホスト名（空のラベルなど）はたどらない。
     """
     try:
         location = location.encode("latin-1").decode("utf-8")
@@ -602,13 +855,20 @@ def _redirect_target(base, location):
     if parts.scheme.lower() not in ("http", "https") or not hostname:
         return None, "http / https 以外へのリダイレクト"
     netloc = parts.netloc
+    ascii_host = hostname
     if not hostname.isascii():
+        if _has_idna_deviation(netloc.rpartition("@")[2]):
+            return None, "リダイレクト先のホスト名に、IDNA 2003 と IDNA 2008 で変換の結果が違う文字（ß など）がある"
         try:
             ascii_host = hostname.encode("idna").decode("ascii")
         except UnicodeError:
             return None, "リダイレクト先のホスト名を IDNA の表記にできない"
         userinfo = netloc.rpartition("@")[0] + "@" if "@" in netloc else ""  # userinfo は取得の前の確認で止める
         netloc = userinfo + ascii_host + (":{}".format(port) if port is not None else "")
+    if ":" not in ascii_host:
+        problem = _host_shape_problem(ascii_host)
+        if problem:
+            return None, "リダイレクト先のホスト名の形が正しくない（{}）".format(problem)
     target = urlunsplit((parts.scheme, netloc, parts.path, parts.query, ""))
     return quote(target, safe="!#$%&'()*+,/:;=?@[]~"), ""
 
@@ -624,18 +884,28 @@ def _read_limited(response, limit):
     return bytes(buf)
 
 
-def _request(opener, url, timeout):
-    # type: (urllib.request.OpenerDirector, str, float) -> tuple
-    """1回だけ取得して (ステータス, Location, 本文) を返す。本文は 2xx のときだけ、上限 + 1 バイトまで読む。"""
+def _request(opener, url, timeout, deadline=None):
+    # type: (urllib.request.OpenerDirector, str, float, object) -> tuple
+    """
+    1回だけ取得して (ステータス, Location, 本文) を返す。本文は 2xx のときだけ、上限 + 1 バイトまで読む。
+    deadline（_Deadline）があれば、取得全体の締め切りで止める。締め切りで読み込みを止めたときは、途中までの
+    本文を返さずに _DeadlineExceeded にする。
+    """
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    response = opener.open(request, timeout=timeout)
+    response = None
     try:
+        response = opener.open(request, timeout=deadline.op_timeout(timeout) if deadline is not None else timeout)
         code = int(response.status)
         location = response.headers.get("Location")
         body = _read_limited(response, MAX_ROBOTS_BYTES + 1) if 200 <= code < 300 else b""
-        return code, location, body
     finally:
-        response.close()
+        # ソケットを閉じる前に締め切りの監視から外す（閉じた fd を別のスレッドから触らないため）
+        cut = deadline.release() if deadline is not None else False
+        if response is not None:
+            response.close()
+    if cut:
+        raise _DeadlineExceeded("取得全体の締め切り（{:g} 秒）を過ぎた".format(deadline.seconds))
+    return code, location, body
 
 
 def _describe_error(exc, timeout):
@@ -647,6 +917,8 @@ def _describe_error(exc, timeout):
         return "タイムアウト（{} 秒）".format(timeout)
     if ssl is not None and isinstance(reason, ssl.SSLError):
         return "TLS のエラー（{}）".format(reason)
+    if isinstance(reason, TooManyInterimResponses):
+        return "応答を読めない（1xx の中間の応答が {} 個を超えた）".format(MAX_INTERIM_RESPONSES)
     if isinstance(reason, http.client.HTTPException):
         return "応答を読めない（{}）".format(type(reason).__name__)  # 中身はサーバーが決めるので出さない
     if isinstance(reason, ValueError):
@@ -671,7 +943,7 @@ def decode_robots(data):
 
 def looks_like_utf16(data):
     # type: (bytes) -> bool
-    """UTF-16 \u3067\u4fdd\u5b58\u3055\u308c\u305f robots.txt \u3089\u3057\u3044\u304b\uff08UTF-16 \u306e BOM \u304c\u3042\u308b\u304b\u3001\u5148\u982d\u306e 1 KiB \u306b NUL \u30d0\u30a4\u30c8\u304c\u3042\u308b\uff09\u3002"""
+    """UTF-16 で保存された robots.txt らしいか（UTF-16 の BOM があるか、先頭の 1 KiB に NUL バイトがある）。"""
     if data.startswith(codecs.BOM_UTF16_LE) or data.startswith(codecs.BOM_UTF16_BE):
         return True
     return b"\x00" in data[:1024]
@@ -679,7 +951,7 @@ def looks_like_utf16(data):
 
 def _set_body(state, data):
     # type: (dict, bytes) -> None
-    """\u53d6\u5f97\u3057\u305f\u304b\u8aad\u3093\u3060 robots.txt \u306e\u4e2d\u8eab\u3092 state \u306b\u5165\u308c\u3001state \u3092 ok \u306b\u3059\u308b\u3002"""
+    """取得したか読んだ robots.txt の中身を state に入れ、state を ok にする。"""
     text, truncated, replaced = decode_robots(data)
     state.update(state="ok", text=text, truncated=truncated, replaced=replaced, utf16=looks_like_utf16(data))
 
@@ -692,10 +964,16 @@ def _new_state(url):
 
 def _name_not_found(exc):
     # type: (BaseException) -> bool
-    """\u540d\u524d\u89e3\u6c7a\u3067\u300c\u305d\u306e\u540d\u524d\u304c\u306a\u3044\u300d\uff08EAI_NONAME\uff09\u3068\u8fd4\u3063\u305f\u304b\u3002\u4e00\u6642\u7684\u306a\u5931\u6557\uff08EAI_AGAIN \u306a\u3069\uff09\u306f\u542b\u3081\u306a\u3044\u3002"""
+    """
+    名前解決で「その名前がない」（EAI_NONAME）か「名前はあるがアドレスがない」（EAI_NODATA。Linux の glibc は、
+    apex に A / AAAA のレコードがなく www だけにあるドメインなどでこれを返す）と返ったか。
+    一時的な失敗（EAI_AGAIN など）は含めない。EAI_NODATA の定数がない環境では EAI_NONAME だけを見る。
+    """
     reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-    code = getattr(socket, "EAI_NONAME", None)
-    return isinstance(reason, socket.gaierror) and code is not None and reason.errno == code
+    if not isinstance(reason, socket.gaierror):
+        return False
+    codes = [getattr(socket, name, None) for name in ("EAI_NONAME", "EAI_NODATA")]
+    return reason.errno in [code for code in codes if code is not None]
 
 
 def fetch_robots(origin, timeout, allow_private):
@@ -704,27 +982,46 @@ def fetch_robots(origin, timeout, allow_private):
     origin（scheme://host[:port]。URL を渡してもよい）の /robots.txt を取得する。返り値のキー:
     state（ok / missing / unreachable / rate_limited）, code, text, url, final_url, detail, truncated, replaced, utf16。
     userinfo 付きの URL と、内部アドレスに解決されるホスト（allow_private でないとき）は InputError。
-    最初の URL のホスト名が名前解決で見つからない（EAI_NONAME。打ち間違いなど）ときも InputError にする。
-    全拒否（取得できず）の表を出すと、サイトが全クローラーを拒否しているように読めてしまうため。
-    一時的な失敗（EAI_AGAIN など）とリダイレクト先の失敗は unreachable のまま。
+    最初の URL のホスト名が名前解決で見つからない（EAI_NONAME。打ち間違いなど）か、名前はあるがアドレスがない
+    （EAI_NODATA）ときも InputError にする。全拒否（取得できず）の表を出すと、サイトが全クローラーを拒否して
+    いるように読めてしまうため。一時的な失敗（EAI_AGAIN など）とリダイレクト先の失敗は unreachable のまま。
+    timeout はソケットの1回の操作の上限。取得全体（名前解決とリダイレクトを含む）は total_timeout(timeout) 秒で
+    打ち切り、unreachable（タイムアウト）にする。
     """
     url = origin_of(origin) + "/robots.txt"
     if url.startswith("https:") and not _HAS_HTTPS:
         raise InputError("この Python は ssl に対応していないため、https の robots.txt を取得できません")
     state = _new_state(url)
-    opener = _build_opener(allow_private)
+    deadline = _Deadline(total_timeout(timeout))
+    try:
+        return _fetch_with_redirects(state, url, timeout, allow_private, deadline)
+    finally:
+        deadline.cancel()
+
+
+def _fetch_with_redirects(state, url, timeout, allow_private, deadline):
+    # type: (dict, str, float, bool, _Deadline) -> dict
+    """fetch_robots の本体。リダイレクトをたどりながら取得し、state を埋めて返す。"""
+    opener = _build_opener(allow_private, deadline)
     redirects = 0
     while True:
         state["final_url"] = url
         try:
+            deadline.check()
             _check_target(url, allow_private, redirects > 0)
-            code, location, body = _request(opener, url, timeout)
+            deadline.check()  # 名前解決（getaddrinfo）は途中で止められないので、終わってから確かめる
+            code, location, body = _request(opener, url, timeout, deadline)
         except (OSError, http.client.HTTPException, ValueError) as exc:
             if redirects == 0 and _name_not_found(exc):
-                raise InputError("{} の名前解決ができません（その名前は見つかりません）。ホスト名に打ち間違いが"
-                                 "ないか、ネットワークにつながっているかを確かめてください（macOS はネットワークに"
-                                 "つながっていないときも同じエラーを返します）".format(urlsplit(url).hostname))
-            state.update(state="unreachable", detail=_describe_error(exc, timeout))
+                raise InputError("{} の名前解決ができません（その名前が見つからないか、名前にアドレスが登録されて"
+                                 "いません）。ホスト名に打ち間違いがないか、ネットワークにつながっているかを確かめて"
+                                 "ください（macOS はネットワークにつながっていないときも同じエラーを返します）".format(
+                                     urlsplit(url).hostname))
+            if deadline.passed():
+                detail = DETAIL_DEADLINE.format(deadline.seconds)
+            else:
+                detail = _describe_error(exc, timeout)
+            state.update(state="unreachable", detail=detail)
             return state
         state["code"] = code
         if 200 <= code < 300:
@@ -1299,21 +1596,40 @@ def build_parser():
     parser.add_argument("--file", help="手元の robots.txt のファイル（--url とどちらか一方）")
     parser.add_argument("--paths", default="/", help="判定するパス。カンマ区切り（既定: /）")
     parser.add_argument("--format", default="md", help="出力の形式: md（既定）か csv")
-    parser.add_argument("-o", "--output", help="出力先のファイル。省略すると標準出力")
+    parser.add_argument("-o", "--output", help="出力先のファイル（--file・--crawlers のファイルとは別にする）。"
+                                               "省略すると標準出力に UTF-8 で書く")
     parser.add_argument("--crawlers", help="クローラーの一覧の CSV（既定: スキルの data/ai-crawlers.csv）")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
-                        help="取得のタイムアウト（秒、既定 {:g}、0 より大きく {:g} 以下）".format(
-                            DEFAULT_TIMEOUT, MAX_TIMEOUT))
+                        help="接続や1回の読み込みを待つ秒数（既定 {:g}、0 より大きく {:g} 以下）。取得全体"
+                             "（名前解決とリダイレクトを含む）は、この {} 倍か {:g} 秒の長いほうで打ち切る".format(
+                                 DEFAULT_TIMEOUT, MAX_TIMEOUT, TOTAL_TIMEOUT_FACTOR, MIN_TOTAL_TIMEOUT))
     parser.add_argument("--allow-private", action="store_true",
                         help="内部アドレス（プライベート IP など）に解決されるホストからも取得する")
     return parser
 
 
+def _write_stdout(text):
+    # type: (str) -> None
+    """
+    標準出力に UTF-8 で書く（compare_runs.py の _write_stdout と同じ方式）。Windows で標準出力をパイプやファイルに
+    つなぐと、Python の標準出力の文字コードは cp932 になり、cp932 にない文字（--paths の é や – など）で
+    UnicodeEncodeError になる。そこで、文字コードの層を通さずに UTF-8 のバイト列を書く（-o で書くファイルと同じ）。
+    """
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:  # 標準出力が差し替えられている（テストなど）
+        sys.stdout.write(text)
+        return
+    sys.stdout.flush()
+    buffer.write(text.encode("utf-8"))
+    buffer.flush()
+
+
 def _write_csv_stdout(rows):
     # type: (list) -> None
     """
-    CSV を標準出力に書く（BOM なし、sanitize しない）。CSV の行末は \\r\\n なので、改行を変換する標準出力
-    （Windows では \\n → \\r\\n）にそのまま書くと \\r\\r\\n になる。下のバイト列に newline="" で書き直す。
+    CSV を標準出力に UTF-8 で書く（BOM なし、sanitize しない）。文字コードは _write_stdout と同じ理由で UTF-8 に
+    固定する。CSV の行末は \\r\\n なので、改行を変換する標準出力（Windows では \\n → \\r\\n）にそのまま書くと
+    \\r\\r\\n になる。下のバイト列に newline="" で書き直す。
     """
     stream = sys.stdout
     buffer = getattr(stream, "buffer", None)
@@ -1321,13 +1637,32 @@ def _write_csv_stdout(rows):
         write_csv_stream(stream, OUTPUT_FIELDS, rows, sanitize=False)
         return
     stream.flush()
-    wrapper = io.TextIOWrapper(buffer, encoding=getattr(stream, "encoding", None) or "utf-8",
-                               errors=getattr(stream, "errors", None) or "strict", newline="")
+    wrapper = io.TextIOWrapper(buffer, encoding="utf-8", errors="strict", newline="")
     try:
         write_csv_stream(wrapper, OUTPUT_FIELDS, rows, sanitize=False)
         wrapper.flush()
     finally:
         wrapper.detach()  # 標準出力のバイト列は閉じない
+
+
+def _check_output_is_not_input(output, inputs):
+    # type: (object, list) -> None
+    """
+    -o の出力先が入力のファイル（inputs: [(引数の名前, パス)]）と同じなら InputError。入力の robots.txt や
+    クローラーの一覧を報告で上書きしないため。書き方の違い（相対パス、シンボリックリンク）も os.path.samefile で見る。
+    """
+    if not output or not os.path.exists(output):
+        return
+    for flag, path in inputs:
+        if not path:
+            continue
+        try:
+            same = os.path.samefile(output, path)
+        except OSError:  # 入力のファイルがない（後で入力の誤りとして止める）
+            continue
+        if same:
+            raise InputError("-o の出力先が {} のファイルと同じです。入力を上書きしないよう、別のファイルを指定して"
+                             "ください: {}".format(flag, output))
 
 
 def run(args):
@@ -1340,6 +1675,7 @@ def run(args):
         raise InputError("--format は md か csv にしてください: {}".format(args.format))
     if not (math.isfinite(args.timeout) and 0 < args.timeout <= MAX_TIMEOUT):
         raise InputError("--timeout は 0 より大きく {:g} 以下の秒数にしてください: {}".format(MAX_TIMEOUT, args.timeout))
+    _check_output_is_not_input(args.output, [("--file", args.file), ("--crawlers", args.crawlers or DEFAULT_CRAWLERS)])
     paths = parse_paths(args.paths)
     if not args.crawlers and not os.path.isfile(DEFAULT_CRAWLERS):
         raise InputError("既定のクローラーの一覧 {} がありません。スキルのフォルダが欠けていないか確かめるか、"
@@ -1366,9 +1702,9 @@ def run(args):
                 with open(args.output, "w", encoding="utf-8", newline="\n") as f:
                     f.write(report)
             else:
-                sys.stdout.write(report)
+                _write_stdout(report)
         sys.stdout.flush()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise InputError("出力を書けません: {}（{}）".format(args.output or "標準出力", exc))
 
     log("robots.txt を判定しました: クローラー {} 件 × パス {} 件{}".format(

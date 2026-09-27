@@ -13,11 +13,16 @@ normalize_observations.py - 回答ファイルを observations.csv と citations
   answers/      回答ファイル（answers/<ラウンド>/<サービス>/<プロンプトID>-<回数>.md）。
                 先頭の欄（--- で囲んだ key: value）と、「## 回答」「## 出典」の見出しを持つ。
                 見出しは「## Answer」「## Sources」も受け付ける。
+                フォルダへのシンボリックリンクもたどる（同じ実体のフォルダは1回だけ読む）。
+                回答ファイルは普通のファイルで 5 MiB までにする。FIFO・デバイスへのリンク・5 MiB を超える
+                ファイルは入力の誤り（終了コード 2）。NUL 文字は除いて読み、警告する。
 
 出力（毎回作り直す派生物。手で直さない）:
   observations.csv       1行＝1回答
   citations.csv          1行＝1出典（出典の欄の URL と、回答の欄の中のリンク）
   observations.run.json  スクリプトの版、実行日時、entities.csv と prompts.csv の SHA-256、件数
+  3つとも同じフォルダの一時ファイルに書いてから置き換える。置き換えられない出力（Excel で開いている、
+  読み取り専用、同じ名前のフォルダがある）があれば、どれも置き換えずに終了コード 2 で止まる。
 
 有効な回答の決まり（言及率・引用率の分母に入れるか）:
   - status が空なら、回答の欄に文字があれば「記録済み」、なければ「未記入」とみなす。
@@ -35,32 +40,39 @@ normalize_observations.py - 回答ファイルを observations.csv と citations
     みなし、その下を出典の欄に入れる（見出しの書き方のゆれで、出典のページ名を言及として数えないため）。
   - AI の回答そのものにある、そのほかの ## の見出しでは回答の欄を切らない。「## 出典」の見出しより後ろにある、
     そのほかの ## の見出しの下（メモなど）は、どちらの欄にも入れない。
+  - 2つ目の回答の見出し（「## 回答」「## Answer」）は、その下も回答の欄に入れ、警告する（Q&A の形の回答で
+    社名を数え落とさないため。1つのファイルに回答を2回分貼っていないかを確かめてもらう）。
   - 出典の見出しが見つからず、回答の欄に ## の見出しがあれば警告する（見出しの書き間違いに気づくため）。
 
 言及の判定:
   - 回答の欄だけを見る（出典の欄のページ名は数えない）。
-  - 照合の前に、回答の欄の URL を空白に置き換える。Markdown のリンクは URL とタイトルを消し、リンクの文字は
-    残す。参照形式のリンクは、定義の行（[1]: URL "タイトル"）をまるごと消す。リンクの文字がリンク先の
-    ドメインだけのものは、文字も消す。
+  - 照合の前に、回答の欄の URL を空白に置き換える。Markdown のリンクは URL とタイトル（\" のエスケープを
+    含むもの）を消し、リンクの文字は残す。参照形式のリンクは、定義の行（[1]: URL "タイトル"）を、タイトルの形
+    にかかわらずまるごと消す。リンクの文字がリンク先のドメインだけのものは、文字も消す。リンク先が行き先の
+    わからないリダイレクトや短縮 URL なら、文字がドメインの形のときに消す。
   - 出典のチップ（半角のかっこの中がリンクだけのもの。([架空珈琲][1])、([架空珈琲](URL))、
     ([A][1], [B][2])）は、リンクの文字がサイト名でも、かっこごと消す。ChatGPT の回答をコピーすると、
     出典の表示がこの形になるため。かっこの中にほかの文字がある、全角のかっこ、かっこのないリンクは、
     回答の文とみなして文字を残す（「[架空珈琲](URL)の豆は」は言及として数える）。
   - 回答の欄の URL の直後に空白なしで日本語が続き、その手前までが出典の欄の URL と同じなら、そこで URL を
-    切り、日本語を照合に残す。出典の欄の URL は切らない（日本語を含む URL があるため）。
+    切り、日本語を照合に残す。ただし、出典の欄の URL が / で終わる（トップページなど）なら切らない（日本語の
+    パスの一部とみなす）。出典の欄の URL は切らない（日本語を含む URL があるため）。
   - 本文と表記の両方を正規化（NFKC、大文字・小文字、ダッシュ類、連続する空白）してから探す。
   - 英数字で始まる（終わる）表記は、前（後ろ）の文字が英数字なら一致とみなさない。
   - 除外語の出現範囲に含まれる一致は数えない。
 
 引用の判定:
-  - 出典の欄の URL を出現順に拾い、同じ URL（追跡用のパラメータを除いて比べる）の2回目以降は
-    数えない。出現順を source_order にする。画面の表示順であって、重要度を表すとは限らない。
-  - ホスト名のない URL（https:// だけ）は URL とみなさない。
+  - 出典の欄の URL を出現順に拾い、同じ URL（追跡用のパラメータを除き、ホストの日本語表記と Punycode 表記、
+    パスとクエリのパーセントエンコードの違いをそろえて比べる）の2回目以降は数えない。出現順を source_order に
+    する。画面の表示順であって、重要度を表すとは限らない。citations.csv の url には最初に出た書き方を出す。
+  - ホスト名のない URL（https:// だけ）は URL とみなさない。ポートが ASCII の数字（0〜65535）でない URL と、
+    角かっこの中が IPv6 のアドレスでない URL は、Python の版によらず entity_kind=unresolved にする。
   - 回答の欄のリンクは location=body とし、source_order は付けない。出典の欄と同じ URL は数えない。
   - Google の /url?q= は行き先に戻す。行き先を復元できないリダイレクト用の URL と短縮 URL は
     entity_kind=unresolved にする。
   - ホスト名が entities.csv のドメインか、そのサブドメインなら、その entity とする。複数に当たれば
-    いちばん長いドメインを使う（同じ長さなら自社を先にし、entities.csv の順）。
+    いちばん長いドメインを使う（同じ長さなら自社を先にし、entities.csv の順）。ホスト名とドメインは、どちらも
+    ラベルごとの IDNA（ASCII）の形にそろえて比べ、citations.csv の host にもその形（xn--…）を出す。
   - own_cited は、自社のドメインの URL が出典か本文のリンクにあることだけを表す。
     その出典が自社についての主張を裏付けているかは判定しない。
   - 出典の欄に URL のない行があれば警告する。ただし、ページ名の行の次の行に（番号や記号なしで）URL が
@@ -86,13 +98,17 @@ mode:
 import argparse
 import csv
 import datetime
+import hashlib
+import ipaddress
 import json
 import os
 import re
+import stat
 import sys
 import traceback
 import unicodedata
-from urllib.parse import parse_qsl, unquote_plus, urlsplit
+import uuid
+from urllib.parse import parse_qsl, quote_from_bytes, unquote_plus, urlsplit
 
 sys.dont_write_bytecode = True  # スキルのフォルダに __pycache__ を残さない（共通処理を import する前に置く）
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -120,19 +136,22 @@ DUPLICATE_KEY = ("round", "prompt_id", "service", "surface", "login", "mode", "r
 
 # URL の終わりとみなす文字: 空白、<>"'`、全角のかっこ・かぎかっこ・引用符、[]{}|\^、全角の読点・句点。
 # 半角の ( ) は URL に含まれうる（Wikipedia など）ので許し、clean_url_tail で対応の取れない ) を外す。
-URL_RE = re.compile(
-    r"https?://[^\s<>\"'`「」『』【】（）［］〈〉《》〔〕〘〙〚〛“”‘’｛｝｜\[\]{}|\\^、。，．]+", re.I)
+_URL_CHARS = r"[^\s<>\"'`「」『』【】（）［］〈〉《》〔〕〘〙〚〛“”‘’｛｝｜\[\]{}|\\^、。，．]"
+URL_RE = re.compile(r"https?://" + _URL_CHARS + r"+", re.I)
 # Markdown のリンク [文字](URL "タイトル")。グループは 1 リンクの文字、2 かっこの部分、3 URL。
-# タイトルは "…"、'…'、(…) のどれか。URL の中のかっこは1段だけ許す（Wikipedia の A_(B) など）。
+# タイトルは "…"、'…'、(…) のどれかで、\" のようなバックスラッシュのエスケープを含んでよい。
+# URL の中のかっこは1段だけ許す（Wikipedia の A_(B) など）。
 # ) の直後に日本語が続いても URL に含めないよう、ふつうの URL より先にこちらを拾う。
 MD_LINK_RE = re.compile(
     r"\[([^\[\]\n]*)\]"
     r"(\(\s*<?(https?://(?:[^\s()<>]|\([^\s()<>]*\))+)>?"
-    r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\))", re.I)
+    r"(?:\s+(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'|\((?:[^()\\\n]|\\.)*\)))?\s*\))", re.I)
 # 参照形式のリンクの定義の行 [1]: URL "タイトル"。グループは 1 参照の名前、2 URL。
+# 行頭が [名前]: http で始まる行は、URL の後ろのタイトルの形（\" のエスケープ、生の "、入れ子のかっこ、
+# 引用符のない文、空白なしで続くタイトル）にかかわらず行ごと定義とみなす。タイトルの解析に失敗して、ページ名が
+# 言及に回らないため。URL は URL_RE と同じ文字で切る（空白なしで続く "…" や「…」を URL に含めないため）。
 MD_REF_DEF_RE = re.compile(
-    r"^[^\S\n]*\[([^\[\]\n]+)\]:[^\S\n]*<?(https?://[^\s<>]+)>?"
-    r"(?:[^\S\n]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[^\S\n]*$", re.I | re.M)
+    r"^[^\S\n]*\[([^\[\]\n]+)\]:[^\S\n]*<?(https?://" + _URL_CHARS + r"+)[^\n]*$", re.I | re.M)
 # 参照形式のリンク [文字][1]、[文字][]、[文字]。グループは 1 リンクの文字、2 参照の名前（なければ None）。
 MD_REF_USE_RE = re.compile(r"\[([^\[\]\n]+)\](?:\[([^\[\]\n]*)\])?")
 # 出典のチップの中で、リンクとリンクの間に置かれる区切り（空白と、カンマか読点1つ）
@@ -177,7 +196,17 @@ _WS_RE = re.compile(r"\s+")
 # observed_at の先頭の日付（2026-10-01、2026/10/1、2026.10.01、2026年10月1日）
 _NUMERIC_DATE_RE = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)")
 _JA_DATE_RE = re.compile(r"^(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日")
-_DIGITS_RE = re.compile(r"^[0-9]+$")
+# repeat の値。桁数に上限を付ける（Python 3.11 以降の int() は 4300 桁を超えると ValueError を出すため）
+_REPEAT_RE = re.compile(r"[0-9]{1,6}")
+# URL のポート。ASCII の数字だけ（Python の版によって +443、4_43、全角の数字の扱いが違うので、自前で読む）
+_PORT_RE = re.compile(r"[0-9]{1,5}")
+# 照合用のキーでデコードしない %XX（予約文字と % 自身）。デコードすると URL の意味が変わる
+_PCT_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+_KEEP_ENCODED = frozenset(b":/?#[]@!$&'()*+,;=%")
+# 照合用のキーで % 付きにしない文字（英数字と -._~ は quote_from_bytes がもともと残す）
+_KEY_SAFE = "!#$&'()*+,/:;=?@[]~%"
+# 回答ファイルの大きさの上限。貼り付けた回答としてありえない大きさのファイルで、メモリを使い切らないため
+MAX_ANSWER_BYTES = 5 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +249,9 @@ def split_sections(body):
     本文から (回答の欄, 出典の欄) を取り出す。見出しがなければ None。
     回答の欄は、最初の回答の見出しの次の行から。AI の回答そのものにある ## の見出し（"other"）では切らず、
     その行も回答の欄に含める。出典の見出し（"sources-strict" と "sources"）の下は出典の欄に入れ、
-    複数あればつなげる。「## 出典」の見出しより後ろの "other" の見出しの下（メモなど）と、
-    2つ目の回答の見出しより後ろは、どちらの欄にも入れない。
+    複数あればつなげる。「## 出典」の見出しより後ろの "other" の見出しの下（メモなど）は、どちらの欄にも入れない。
+    2つ目の回答の見出し（Q&A の形の回答や、英語の回答の「## Answer」）は、見出しの行とその下を回答の欄に
+    つなげる（「## 出典」より後ろにあっても同じ）。黙って捨てると社名を数え落とすため。process_answer が警告する。
     """
     lines = (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     answer = None  # type: object
@@ -239,9 +269,9 @@ def split_sections(body):
         if kind == "answer":
             if answer is None:
                 answer = []
-                state = target = "answer"
             else:
-                state, target = "after", None
+                answer.append(line)  # 2つ目の回答の見出し。その下も回答の欄に入れる
+            state = target = "answer"
         elif kind in ("sources-strict", "sources"):
             if sources is None:
                 sources = []
@@ -261,6 +291,12 @@ def _has_level2_heading(text):
     # type: (str) -> bool
     """回答の欄に、AI の回答そのものの ## の見出しがあるか。"""
     return any(_heading_kind(line) == "other" for line in (text or "").split("\n"))
+
+
+def _count_answer_headings(body):
+    # type: (str) -> int
+    """本文の中の回答の見出し（## 回答 / ## Answer）の数。"""
+    return sum(1 for line in (body or "").split("\n") if _heading_kind(line) == "answer")
 
 
 # ---------------------------------------------------------------------------
@@ -333,8 +369,11 @@ def _bare_host(value):
 
 def _is_domain_label(label, url):
     # type: (str, str) -> bool
-    """リンクの文字が、リンク先（Google の /url なら行き先）のドメインだけなら True。"""
-    label_host = _bare_host(label)
+    """
+    リンクの文字が、リンク先（Google の /url なら行き先）のドメインだけなら True。
+    日本語ドメインは、Unicode 表記と Punycode 表記のどちらで書いても同じとみなす（IDNA の ASCII の形で比べる）。
+    """
+    label_host = common.ascii_host(_bare_host(label))
     if not label_host:
         return False
     hosts = set()
@@ -344,13 +383,25 @@ def _is_domain_label(label, url):
         pass
     hosts.add(_bare_host(normalize_url(url)[1]))
     hosts.discard("")
-    return label_host in hosts
+    return label_host in set(common.ascii_host(host) for host in hosts)
 
 
 def _looks_like_domain(label):
     # type: (str) -> bool
-    """文字がドメインの形（kakuucoffee.example）だけなら True。"""
-    return bool(_DOMAIN_LABEL_RE.match(_bare_host(label)))
+    """文字がドメインの形（kakuucoffee.example、日本語ドメイン）だけなら True。"""
+    return bool(_DOMAIN_LABEL_RE.match(common.ascii_host(_bare_host(label))))
+
+
+def _is_source_label(label, url):
+    # type: (str, object) -> bool
+    """
+    リンクの文字が出典の表示（ドメインだけの文字）なら True。行き先がわかるリンクは、文字がリンク先の
+    ドメインと同じときだけ True（別のドメインなら回答の文とみなして残す）。行き先がわからないリンク
+    （定義のない参照、リダイレクト用の URL、短縮 URL）は、文字がドメインの形なら True。
+    """
+    if url is None or normalize_url(url)[2]:
+        return _looks_like_domain(label)
+    return _is_domain_label(label, url)
 
 
 def _ref_key(value):
@@ -364,12 +415,15 @@ def _cut_at_known_prefix(url, known_urls):
     """
     URL の途中から日本語などの ASCII でない文字が続き、その手前までが known_urls のどれかと同じなら、
     そこで切る（「https://a.example/x架空珈琲が人気」の「架空珈琲が人気」を URL に含めないため）。
-    いちばん長く一致するものを使う。出典の欄にトップページの URL（https://a.example/）しかなく、本文に
-    日本語のパスの URL（https://a.example/メニュー）があると、トップページで切ってしまう。ホストは同じなので、
-    どの entity の引用かの判定は変わらない。
+    いちばん長く一致するものを使う。/ で終わる known_urls（トップページ https://a.example/ やフォルダ）では
+    切らない。/ の直後に続く日本語は、WordPress の日本語のスラッグのようなパスの一部であることが多く、
+    切るとパスの中の社名を言及として数えてしまうため（「https://a.example/架空珈琲が人気」のように、
+    トップページの直後に文が続く場合は URL の一部とみなし、その中の社名は数えない）。
     """
     best = 0
     for known in known_urls:
+        if known.endswith("/"):
+            continue
         n = len(known)
         if n > best and len(url) > n and not url[n].isascii() and url[:n].lower() == known.lower():
             best = n
@@ -424,10 +478,11 @@ def _scan_links(text, known_urls=None):
     """
     本文の中の URL とリンクを調べ、(URL の一覧（出現順）, 言及の照合の前に空白にする範囲の一覧) を返す。
     次の順に拾い、拾った部分を空白で隠してから次を探す。
-      1. 参照形式のリンクの定義の行（[1]: URL "タイトル"）。行ごと消す。
+      1. 参照形式のリンクの定義の行（[1]: URL "タイトル"）。タイトルの形にかかわらず行ごと消す。
       2. インラインのリンク [文字](URL "タイトル")。かっこの部分を消し、文字がリンク先のドメインだけなら文字も消す。
       3. 参照形式のリンク [文字][1]。[1] の部分を消し、文字がリンク先のドメインだけなら文字も消す。
          定義が見つからないときは、文字がドメインの形なら消す（出典の表示とみなす）。
+         2 と 3 で、リンク先が行き先のわからないリダイレクトや短縮 URL のときも、文字がドメインの形なら消す。
       4. 出典のチップ（半角のかっこの中がリンクだけのもの。_chip_spans）。リンクの文字がサイト名でも、
          かっこごと消す（ChatGPT の出典の表示を、言及として数えないため）。
       5. ふつうの URL。対応する ( のない ) の手前で切り、末尾の句読点を外す。known_urls があれば、
@@ -456,7 +511,7 @@ def _scan_links(text, known_urls=None):
         url = clean_url_tail(match.group(3))
         if url and _has_host(url):
             found.append((match.start(3), url))
-            if _is_domain_label(match.group(1), url):
+            if _is_source_label(match.group(1), url):
                 cuts.append(match.span(1))
         link_spans.append(match.span(2))
         links.append(match.span())
@@ -474,7 +529,7 @@ def _scan_links(text, known_urls=None):
         links.append(match.span())
         if ref is not None:
             cuts.append((match.end(1) + 1, match.end()))  # [1] の部分
-        if (_is_domain_label(label, url) if url is not None else _looks_like_domain(label)):
+        if _is_source_label(label, url):
             cuts.append(match.span(1))
 
     cuts.extend(_chip_spans(text, links))
@@ -559,37 +614,101 @@ def normalize_url(url):
     """
     (照合用の URL, ホスト, 行き先不明か) を返す。スキームとホストを小文字に、既定のポートと
     フラグメントと追跡用のパラメータを外す。Google の /url は行き先に戻す（1回だけ）。
-    解釈できない URL は (元の文字列, "", True)。
+    ホストは entities.csv のドメインと同じ IDNA（ASCII）の形にする（日本語ドメインは xn-- の形）。
+    照合用の URL のホストは書いたとおり（小文字）に残す。
+    解釈できない URL（ポートが ASCII の数字で 0〜65535 でない、角かっこの中が IPv6 のアドレスでない、など）は
+    (元の文字列, "", True)。ポートは Python の版によらず同じに読むよう、urlsplit の port を使わない。
     """
-    return _normalize_url(url, True)
+    return _normalize_url(url, True)[:3]
+
+
+def _split_port(netloc):
+    # type: (str) -> object
+    """
+    netloc（user@host:port）からポートの文字列を取り出す。ポートがなければ None。角かっこで囲んだホストは、
+    IPv6 のアドレスでなければ ValueError（Python 3.9.6 は通し、新しい版は拒むので、版によらずここで拒む）。
+    """
+    hostport = netloc.rpartition("@")[2]
+    if hostport.startswith("["):
+        end = hostport.find("]")
+        if end < 0:
+            raise ValueError("角かっこが閉じていません")
+        ipaddress.IPv6Address(hostport[1:end].split("%", 1)[0])  # IPv6 でなければ ValueError
+        rest = hostport[end + 1:]
+        if rest and not rest.startswith(":"):
+            raise ValueError("角かっこの後ろに : 以外の文字があります")
+        return rest[1:] if rest else None
+    _host, sep, port = hostport.partition(":")
+    return port if sep else None
+
+
+def _parse_port(value):
+    # type: (object) -> object
+    """ポートの文字列を整数にする。空か None なら None。ASCII の数字で 0〜65535 でなければ ValueError。"""
+    if not value:
+        return None
+    if not _PORT_RE.fullmatch(value) or int(value) > 65535:
+        raise ValueError("ポートが正しくありません: {}".format(value))
+    return int(value)
+
+
+def _canonical_percent(value):
+    # type: (str) -> str
+    """
+    パスやクエリのパーセントエンコードをそろえる（照合用のキーにだけ使う）。予約文字（: / ? # [ ] @ ! $ & ' ( ) * + , ; =）
+    と % 自身の %XX はデコードせず16進を大文字に、それ以外の %XX はデコードしてから、ASCII でない文字などを
+    %XX（大文字）にし直す。https://a.example/%E3%83%A1、/%e3%83%a1、/メ は同じ形になる。%2F と / は区別する。
+    """
+    out = bytearray()
+    pos = 0
+    for match in _PCT_RE.finditer(value):
+        out += value[pos:match.start()].encode("utf-8", "surrogatepass")
+        byte = int(match.group(1), 16)
+        if byte in _KEEP_ENCODED:
+            out += ("%" + match.group(1).upper()).encode("ascii")
+        else:
+            out.append(byte)
+        pos = match.end()
+    out += value[pos:].encode("utf-8", "surrogatepass")
+    return quote_from_bytes(bytes(out), safe=_KEY_SAFE)
 
 
 def _normalize_url(url, follow_google):
     # type: (str, bool) -> tuple
+    """
+    (照合用の URL, ホスト, 行き先不明か, 同じ出典かを比べるキー) を返す。キーはホストを IDNA（ASCII）に、
+    パスとクエリのパーセントエンコードをそろえたもの（同じページの日本語表記と %E3… 表記を1回だけ数えるため）。
+    """
     raw = (url or "").strip()
     try:
         parts = urlsplit(raw)
         scheme = parts.scheme.lower()
         host = (parts.hostname or "").rstrip(".")
-        port = parts.port
+        port = _parse_port(_split_port(parts.netloc))
     except ValueError:
-        return raw, "", True
+        return raw, "", True, raw
     if not host:
-        return raw, "", True
+        return raw, "", True, raw
+    key_host = common.ascii_host(host)
     unresolved = False
-    if follow_google and _GOOGLE_HOST_RE.match(host) and parts.path == "/url":
+    if follow_google and _GOOGLE_HOST_RE.match(key_host) and parts.path == "/url":
         target = _google_target(parts.query)
         if target:
             return _normalize_url(target, False)
         unresolved = True  # 行き先の書かれていない Google の /url
-    if _is_unresolved_redirect(host, parts.path):
+    if _is_unresolved_redirect(key_host, parts.path):
         unresolved = True
     netloc = "[" + host + "]" if ":" in host else host
+    key_netloc = "[" + key_host + "]" if ":" in key_host else key_host
     if port is not None and port != DEFAULT_PORTS.get(scheme):
         netloc += ":" + str(port)
+        key_netloc += ":" + str(port)
+    path = parts.path or "/"
     query = _strip_tracking(parts.query)
-    match_url = scheme + "://" + netloc + (parts.path or "/") + ("?" + query if query else "")
-    return match_url, host, unresolved
+    match_url = scheme + "://" + netloc + path + ("?" + query if query else "")
+    key = (scheme + "://" + key_netloc + _canonical_percent(path)
+           + ("?" + _canonical_percent(query) if query else ""))
+    return match_url, key_host, unresolved, key
 
 
 def host_matches(host, domain):
@@ -689,9 +808,12 @@ def _canonical(value, allowed):
 
 def _parse_repeat(value):
     # type: (str) -> object
-    """repeat を正の整数の文字列にする。正の整数でなければ None。"""
+    """
+    repeat を正の整数の文字列にする。正の整数でなければ None（値が不正）。6 桁を超える数字の列も None にする
+    （Python 3.11 以降の int() は 4300 桁を超えると ValueError を出し、1つの回答の誤りで実行全体が止まるため）。
+    """
     value = unicodedata.normalize("NFKC", value or "").strip()
-    if _DIGITS_RE.match(value) and int(value) >= 1:
+    if _REPEAT_RE.fullmatch(value) and int(value) >= 1:
         return str(int(value))
     return None
 
@@ -767,6 +889,57 @@ def _os_reason(exc):
     return exc.strerror or str(exc)
 
 
+def _printable(text):
+    # type: (str) -> str
+    """
+    ファイル名の中の surrogate（UTF-8 でない名前のバイト。Linux の ext4 などで作れる）を \\udcff の形の文字に
+    置き換える。そのままだと CSV を UTF-8 で書けず、traceback で止まるため（ai_robots_check.py と同じ扱い）。
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _read_answer_bytes(path, rel_path):
+    # type: (str, str) -> bytes
+    """
+    回答ファイルの中身をバイト列で読む。普通のファイル（シンボリックリンクなら、その先）だけを読み、
+    MAX_ANSWER_BYTES を超えるものは読まない。FIFO やデバイスへのリンクで止まったり、メモリを使い切ったり
+    しないよう、O_NONBLOCK で開いてから種類を確かめる。どれも InputError（終了コード 2）。
+    """
+    def cannot_read(exc):
+        return common.InputError("回答ファイルを読めません: {}（{}）。ファイルがあるか、読み取りの権限があるかを"
+                                 "確かめてください".format(rel_path, _os_reason(exc)))
+
+    def too_large(size_text):
+        return common.InputError("回答ファイルが大きすぎます: {}（{}。上限は {} MiB）。貼り付けた内容を確かめてください"
+                                 "".format(rel_path, size_text, MAX_ANSWER_BYTES // (1024 * 1024)))
+
+    limit = MAX_ANSWER_BYTES
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise cannot_read(exc)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise common.InputError("回答ファイルが普通のファイルではありません: {}（FIFO やデバイスなど）。回答は .md の"
+                                    "テキストファイルに貼ってください".format(rel_path))
+        if info.st_size > limit:
+            raise too_large("{} バイト".format(info.st_size))
+        f = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with f:
+            data = f.read(limit + 1)
+    except OSError as exc:
+        raise cannot_read(exc)
+    if len(data) > limit:
+        raise too_large("{} MiB を超えています".format(limit // (1024 * 1024)))
+    return data
+
+
 # ---------------------------------------------------------------------------
 # 1つの回答ファイルの処理
 
@@ -776,15 +949,18 @@ def process_answer(path, rel_path, entities, prompts, round_hint=None):
     回答ファイル1つを読み、(observations.csv の行, citations.csv の行の一覧, 警告の一覧) を返す。
     rel_path は観測データのフォルダ（--workspace）からの相対パス（/ 区切り）。prompts は load_prompts の結果か None。
     round_hint はラウンドのフォルダ名（省略すると rel_path の answers/<ラウンド>/ から取る）。
-    ファイルを読めなければ（壊れたシンボリックリンク、権限がないなど）InputError を出す。
+    ファイルを読めなければ（壊れたシンボリックリンク、権限がないなど）、普通のファイルでなければ（FIFO、
+    デバイスへのリンクなど）、MAX_ANSWER_BYTES を超えれば、InputError を出す。
+    NUL（\\x00）は除いてから扱い、警告する（Python 3.9 の csv が NUL を含む CSV を読めないため）。
     """
     warnings = []
-    try:
-        text = common.read_text(path)
-        answer_sha = common.sha256_file(path)[:12]
-    except OSError as exc:
-        raise common.InputError("回答ファイルを読めません: {}（{}）。ファイルがあるか、読み取りの権限があるかを"
-                                "確かめてください".format(rel_path, _os_reason(exc)))
+    data = _read_answer_bytes(path, rel_path)
+    answer_sha = hashlib.sha256(data).hexdigest()[:12]
+    text = common.decode_bytes(data).replace("\r\n", "\n").replace("\r", "\n")
+    nul_count = text.count("\x00")
+    if nul_count:
+        warnings.append("NUL 文字（{} 個）を除きました（貼り付けた内容と文字コードを確かめてください）".format(nul_count))
+        text = common.strip_nul(text)
     meta, body, fm_errors = common.parse_front_matter(text)
     warnings.extend(fm_errors)
     if "�" in text:
@@ -845,6 +1021,10 @@ def process_answer(path, rel_path, entities, prompts, round_hint=None):
     answer, sources = split_sections(body)
     if answer is None:
         warnings.append("## 回答 の見出しがありません")
+    answer_headings = _count_answer_headings(body)
+    if answer_headings > 1:
+        warnings.append("回答の見出しが {} つあります（2つ目より後ろも回答の欄として数えました。1つのファイルに"
+                        "回答を2回分貼っていないか確かめてください）".format(answer_headings))
     answer_text = answer or ""
     has_answer = bool(answer_text.strip())
     source_urls = extract_urls(sources or "")
@@ -935,10 +1115,11 @@ def process_answer(path, rel_path, entities, prompts, round_hint=None):
     seen = set()
     for location, urls in (("sources", source_urls), ("body", body_urls)):
         for url in urls:
-            match_url, host, unresolved = normalize_url(url)
-            if match_url in seen:
+            # 同じ出典かは、ホストの日本語表記と Punycode 表記、パーセントエンコードの違いをそろえたキーで比べる
+            match_url, host, unresolved, key = _normalize_url(url, True)
+            if key in seen:
                 continue
-            seen.add(match_url)
+            seen.add(key)
             if unresolved:
                 entity_id, entity_kind = "", "unresolved"
             else:
@@ -1049,20 +1230,33 @@ def build_parser():
 def _list_answer_files(answers_dir):
     # type: (str) -> list
     """
-    answers/ の下の .md を (絶対パス, answers/ からの相対パス) の一覧で返す。. で始まるものは無視する。
+    answers/ の下の .md を (パス, answers/ からの相対パス) の一覧で返す。. で始まるものは無視する。
     読めないフォルダがあれば InputError にする（回答を黙って落とさないため）。
+    フォルダへのシンボリックリンクもたどる（new_round.py はリンクの先に回答ファイルを作るので、読む側もそろえる）。
+    ループと二重読みを避けるため、たどったフォルダを実体のパス（realpath）で記録し、2回目は飛ばして警告する。
+    相対パスの中の、UTF-8 でない名前のバイトは _printable で置き換える（表示と CSV 用。開くときは元のパスを使う）。
     """
     def fail(exc):
-        raise common.InputError("回答ファイルのフォルダを読めません: {}（{}）".format(exc.filename, _os_reason(exc)))
+        raise common.InputError("回答ファイルのフォルダを読めません: {}（{}）".format(
+            _printable(str(exc.filename)), _os_reason(exc)))
 
     found = []
-    for dirpath, dirnames, filenames in os.walk(answers_dir, onerror=fail):
+    visited = set()
+    for dirpath, dirnames, filenames in os.walk(answers_dir, onerror=fail, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in visited:
+            dirnames[:] = []
+            common.log("警告: 同じフォルダを2回読まないよう、回答ファイルのフォルダの中の {} を飛ばしました"
+                       "（シンボリックリンクの先が、既に読んだフォルダと同じです）".format(
+                           _printable(os.path.relpath(dirpath, answers_dir).replace(os.sep, "/"))))
+            continue
+        visited.add(real)
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         for name in filenames:
             if name.startswith(".") or not name.lower().endswith(".md"):
                 continue
             path = os.path.join(dirpath, name)
-            rel = os.path.relpath(path, answers_dir).replace(os.sep, "/")
+            rel = _printable(os.path.relpath(path, answers_dir).replace(os.sep, "/"))
             found.append((path, rel))
     return found
 
@@ -1077,19 +1271,84 @@ def _rel_to_workspace(path, workspace):
 
 def _write_output(path, write):
     # type: (str, object) -> None
-    """出力ファイルを書く。書けなければ（Excel で開いている、権限がないなど）InputError にする。"""
+    """
+    出力ファイルに関わる処理 write を行う。書けなければ（Excel で開いている、権限がない、同じ名前のフォルダが
+    あるなど）InputError にする。UTF-8 で書けない文字（surrogate）があったときも InputError にする。
+    """
     try:
         write()
     except OSError as exc:
         raise common.InputError("{} を書けません（Excel などで開いていれば閉じてください）: {}（{}）".format(
-            os.path.basename(path), path, _os_reason(exc)))
+            os.path.basename(path), _printable(path), _os_reason(exc)))
+    except UnicodeError as exc:
+        raise common.InputError("{} を書けません: {}（UTF-8 で書けない文字があります: {}）".format(
+            os.path.basename(path), _printable(path), _printable(str(exc))))
+
+
+def _check_replaceable(path):
+    # type: (str) -> None
+    """
+    出力先を置き換えられるかを、書き始める前に確かめる。同じ名前のフォルダや普通のファイルでないもの、
+    書き込みで開けないもの（Excel で開いている、読み取り専用）は OSError。ないときは何もしない。
+    書き込みで開くだけで、中身は変えない。
+    """
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        raise IsADirectoryError(21, "同じ名前のフォルダがあります", path)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError(0, "普通のファイルではありません", path)
+    with open(path, "ab"):
+        pass
+
+
+def _temp_path(path):
+    # type: (str) -> str
+    """出力先と同じフォルダの一時ファイルの名前（. で始まり .tmp で終わる）。"""
+    folder, name = os.path.split(path)
+    return os.path.join(folder, ".{}.{}.tmp".format(name, uuid.uuid4().hex[:12]))
+
+
+def _write_outputs(outputs):
+    # type: (list) -> None
+    """
+    outputs は (出力先のパス, 書く関数（一時ファイルのパスを受け取る）) の一覧。observations.csv、citations.csv、
+    observations.run.json の3つを、そろった状態でだけ置き換えるために使う。
+      1. すべての出力先を置き換えられるかを確かめる（_check_replaceable）。
+      2. すべてを同じフォルダの一時ファイルに書く。
+      3. os.replace で順に置き換える。
+    1 か 2 で失敗すれば、どの出力も元のまま残る。3 の途中で失敗したとき（1 の後に別のアプリがファイルを開いた、
+    など）は、置き換え済みの出力だけが新しくなる。どの場合も一時ファイルは消し、InputError にする。
+    出力先がシンボリックリンクなら、リンク先のファイルを置き換える（リンクは残す）。
+    """
+    # 出力先がシンボリックリンクなら、リンクそのものではなくリンク先を置き換える（一時ファイルもリンク先のフォルダに作る）
+    outputs = [(os.path.realpath(path), write) for path, write in outputs]
+    temps = []
+    try:
+        for path, _write in outputs:
+            _write_output(path, lambda: _check_replaceable(path))
+        for path, write in outputs:
+            temp = _temp_path(path)
+            temps.append(temp)
+            _write_output(path, lambda: write(temp))
+        for (path, _write), temp in zip(outputs, temps):
+            _write_output(path, lambda: os.replace(temp, path))
+    finally:
+        for temp in temps:
+            try:
+                if os.path.lexists(temp):
+                    os.remove(temp)
+            except OSError:
+                pass
 
 
 def _load_csv(load, path):
     # type: (object, str) -> object
     """
     entities.csv か prompts.csv を load で読む。CSV として読めない・ファイルを読めないときは InputError にする。
-    Python 3.9 の csv は NUL を含む行で csv.Error を出す。csv.Error は ValueError の下位クラスではないので、
+    NUL は common.read_csv が除いてから読むが、そのほかの csv.Error（ValueError の下位クラスではない）も
     個別に捕まえる。
     """
     try:
@@ -1166,9 +1425,9 @@ def _run(args):
     items = []
     dropped = []  # --rounds のフォルダにあるのに、round の欄が違うので外した回答
     for path, rel_answers in files:
-        parts = rel_answers.split("/")
+        parts = rel_answers.split("/")  # rel_answers は _printable 済み
         round_hint = parts[0] if len(parts) >= 2 else ""
-        rel_ws = _rel_to_workspace(path, workspace)
+        rel_ws = _printable(_rel_to_workspace(path, workspace))
         obs, cits, warnings = process_answer(path, rel_ws, entities, prompts, round_hint=round_hint)
         if rounds and obs["round"] not in rounds:
             if round_hint in rounds:
@@ -1209,8 +1468,6 @@ def _run(args):
     obs_path = os.path.join(out_dir, "observations.csv")
     cit_path = os.path.join(out_dir, "citations.csv")
     run_path = os.path.join(out_dir, "observations.run.json")
-    _write_output(obs_path, lambda: common.write_csv(obs_path, OBS_FIELDS, observations))
-    _write_output(cit_path, lambda: common.write_csv(cit_path, CIT_FIELDS, citations))
 
     valid_mention = [o for o in observations if o["valid_mention"] == 1]
     valid_citation = [o for o in observations if o["valid_citation"] == 1]
@@ -1226,12 +1483,18 @@ def _run(args):
         "valid_citation": len(valid_citation),
         "rounds": round_names,
     }
-    def write_run_info():
-        with open(run_path, "w", encoding="utf-8") as f:
+    def write_run_info(target):
+        with open(target, "w", encoding="utf-8") as f:
             json.dump(run_info, f, ensure_ascii=False, indent=2)
             f.write("\n")
 
-    _write_output(run_path, write_run_info)
+    # 3つの出力は、すべて書けてから置き換える（一部だけ新しくなり、compare_runs.py が古い citations.csv と
+    # 新しい observations.csv を混ぜて読むのを防ぐ）
+    _write_outputs([
+        (obs_path, lambda target: common.write_csv(target, OBS_FIELDS, observations)),
+        (cit_path, lambda target: common.write_csv(target, CIT_FIELDS, citations)),
+        (run_path, write_run_info),
+    ])
 
     # 要約と警告（標準エラー）
     for obs, _, warnings in items:

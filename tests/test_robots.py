@@ -10,6 +10,7 @@ import csv
 import datetime
 import http.server
 import io
+import ipaddress
 import os
 import shutil
 import socket
@@ -217,10 +218,40 @@ class InternalAddressTest(unittest.TestCase):
                 self.assertTrue(robots.internal_address(address))
 
     def test_public(self):
-        # 公開アドレスの例（接続はしない）
-        for address in ("93.184.215.14", "2606:4700::1"):
+        # 公開アドレスの例（接続はしない）。6to4 は中の IPv4 アドレス（ここでは公開の 93.184.215.14）で判定する
+        for address in ("93.184.215.14", "2606:4700::1", "2002:5db8:d70e::1"):
             with self.subTest(address=address):
                 self.assertFalse(robots.internal_address(address))
+
+    # IANA の特別用途のアドレスのうち、Python のパッチ版で is_private の判定が変わったもの（CVE-2024-4032 の修正）。
+    # macOS の /usr/bin/python3（3.9.6）では、以前はどれも内部と判定されなかった
+    SPECIAL_PURPOSE = (
+        "192.0.0.8", "192.0.0.9", "192.0.0.100", "192.0.0.255",  # IETF のプロトコルの割り当て（192.0.0.0/24）
+        "2002:7f00:1::1", "2002:a00:1::1", "2002:a9fe:a9fe::1", "2002:c0a8:101::1",  # 6to4 に内部の IPv4 を埋め込む
+        "2002:6440:1::1",  # 6to4 に共有アドレス（100.64.0.1）を埋め込む
+        "3fff::1", "2001:db8::1", "64:ff9b:1::1", "2001::1", "100::1", "5f00::1",
+        "198.18.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "192.88.99.1",
+        "224.0.0.1", "240.0.0.1", "255.255.255.255", "fec0::1", "ff02::1", "::7f00:1",
+        "64:ff9b::c000:8",  # NAT64 に 192.0.0.8 を埋め込む
+    )
+
+    def test_special_purpose_addresses(self):
+        for address in self.SPECIAL_PURPOSE:
+            with self.subTest(address=address):
+                self.assertTrue(robots.internal_address(address))
+
+    def test_does_not_depend_on_is_private(self):
+        # ipaddress の is_private が古い表でも（パッチ版の違いを模す）、自前の表で同じ判定になる
+        with mock.patch.object(ipaddress.IPv4Address, "is_private", new_callable=mock.PropertyMock,
+                               return_value=False), \
+                mock.patch.object(ipaddress.IPv6Address, "is_private", new_callable=mock.PropertyMock,
+                                  return_value=False):
+            for address in self.SPECIAL_PURPOSE + ("10.1.2.3", "172.16.0.1", "192.168.1.1", "fc00::1",
+                                                   "::ffff:10.0.0.1"):
+                with self.subTest(address=address):
+                    self.assertTrue(robots.internal_address(address))
+            self.assertFalse(robots.internal_address("93.184.215.14"))
+            self.assertFalse(robots.internal_address("2002:5db8:d70e::1"))
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +762,36 @@ class OriginTest(unittest.TestCase):
                 with self.assertRaises(robots.InputError):
                     robots.origin_of(url)
 
+    def test_rejects_malformed_host(self):
+        # 空のラベル・64 文字以上のラベル・253 文字を超えるホスト名は、名前解決に進まず入力の誤りにする
+        # （以前は IDNA の変換の UnicodeError が「取得できず（全拒否）」になり、終了コード 0 で全拒否の表が出た）
+        long_host = ".".join(["a" * 60] * 5)  # 304 文字
+        for url in ("https://example..com", "https://.example.com", "https://www.example.com..",
+                    "https://" + "a" * 64 + ".com", "https://" + long_host, "https://日本..jp"):
+            with self.subTest(url=url):
+                with self.assertRaises(robots.InputError) as ctx:
+                    robots.origin_of(url)
+                self.assertIn("ホスト名", str(ctx.exception))
+
+    def test_accepts_valid_host_shapes(self):
+        # 末尾の . が1つの FQDN と、63 文字のラベルは有効
+        self.assertEqual(robots.origin_of("https://kakuu-coffee.example."), "https://kakuu-coffee.example.")
+        host = "a" * 63 + ".example"
+        self.assertEqual(robots.origin_of("https://" + host), "https://" + host)
+        self.assertEqual(robots.origin_of("https://日本.example/"), "https://xn--wgv71a.example")
+
+    def test_rejects_idna_deviation_characters(self):
+        # IDNA 2003（Python 標準の idna）と IDNA 2008 で変換の結果が違う文字（ß ς ZWJ ZWNJ）を含むホスト名は、
+        # 黙って別のホスト（faß.de → fass.de）を取得しないよう、入力の誤りにする
+        for url in ("https://faß.de", "https://FAẞ.de", "https://βόλος.com", "https://a‍b.example",
+                    "https://a‌b.example"):
+            with self.subTest(url=url):
+                with self.assertRaises(robots.InputError) as ctx:
+                    robots.origin_of(url)
+                self.assertIn("IDNA", str(ctx.exception))
+        # Punycode の表記なら取得できる
+        self.assertEqual(robots.origin_of("https://xn--fa-hia.de"), "https://xn--fa-hia.de")
+
     def test_userinfo_not_shown_in_messages(self):
         # スキームのない入力や、// のない入力に含まれるパスワードも、エラーの文に出さない
         for url in ("user:secret@kakuu-coffee.example", "https:user:secret@kakuu-coffee.example",
@@ -769,6 +830,20 @@ class RedirectTargetTest(unittest.TestCase):
                                                   "http://kakuu-coffee.example:99999/robots.txt")
         self.assertIsNone(target)
         self.assertIn("解釈できない", problem)
+
+    def test_idna_deviation_host(self):
+        # ß を含むリダイレクト先は、IDNA 2003 で fass.de に変えて取得せず、たどれないものとする
+        raw = "https://faß.de/robots.txt".encode("utf-8").decode("latin-1")
+        target, problem = robots._redirect_target("http://kakuu-coffee.example/robots.txt", raw)
+        self.assertIsNone(target)
+        self.assertIn("IDNA", problem)
+
+    def test_malformed_host(self):
+        for location in ("http://a..example/robots.txt", "http://" + "a" * 64 + ".example/robots.txt"):
+            with self.subTest(location=location):
+                target, problem = robots._redirect_target("http://kakuu-coffee.example/robots.txt", location)
+                self.assertIsNone(target)
+                self.assertIn("ホスト名", problem)
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +973,74 @@ class _PlainTextTLSPeer(object):
         self.stopped.set()
         self.sock.close()
         self.thread.join(2)
+
+
+class _RawPeer(object):
+    """
+    リクエストを読んだあと、respond(conn, path, stopped) で決まったバイト列を返すだけのサーバー。
+    http.server では送れない応答（1xx の中間の応答、1バイトずつの送信）を再現する。接続ごとにスレッドを立てる。
+    """
+
+    def __init__(self, respond):
+        self.respond = respond
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(5)
+        self.sock.settimeout(0.2)
+        self.port = self.sock.getsockname()[1]
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def url(self):
+        return "http://127.0.0.1:{}".format(self.port)
+
+    def _serve(self):
+        while not self.stopped.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn):
+        try:
+            conn.settimeout(10)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                data += chunk
+            path = data.split(b" ", 2)[1].decode("latin-1")
+            self.respond(conn, path, self.stopped)
+        except OSError:  # 取得する側が接続を切った
+            pass
+        finally:
+            conn.close()
+
+    def close(self):
+        self.stopped.set()
+        self.sock.close()
+        self.thread.join(2)
+
+
+def _drip(data, interval):
+    """data を interval 秒ごとに1バイトずつ送る応答（1回の操作のタイムアウトより短い間隔で送り続けるサーバー）。"""
+    def respond(conn, path, stopped):
+        for i in range(len(data)):
+            if stopped.is_set():
+                return
+            conn.sendall(data[i:i + 1])
+            time.sleep(interval)
+    return respond
+
+
+def _ok_response(body=ROBOTS_BODY):
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + str(len(body)).encode("ascii")
+            + b"\r\nConnection: close\r\n\r\n" + body)
 
 
 def _gaierror(code_name, message):
@@ -1119,6 +1262,24 @@ class FetchTest(unittest.TestCase):
             robots.fetch_robots(self.origin("ok"), 5, False)
         self.assertIn("--allow-private", str(ctx.exception))
 
+    def test_special_purpose_address_rejected_with_old_is_private(self):
+        # 名前解決の結果が 6to4 に内部の IPv4 を埋め込んだアドレスや 192.0.0.0/24 のとき、ipaddress の is_private が
+        # 古い表（macOS の /usr/bin/python3 の 3.9.6 など。パッチの前）でも、取得に進まず入力の誤りにする
+        table = {"sixtofour.kakuu-coffee.example": "2002:a00:1::1",
+                 "loop6to4.kakuu-coffee.example": "2002:7f00:1::1",
+                 "ietf.kakuu-coffee.example": "192.0.0.100"}
+        with mock.patch.object(ipaddress.IPv4Address, "is_private", new_callable=mock.PropertyMock,
+                               return_value=False), \
+                mock.patch.object(ipaddress.IPv6Address, "is_private", new_callable=mock.PropertyMock,
+                                  return_value=False), \
+                self.patched_dns(table):
+            for host, address in table.items():
+                with self.subTest(host=host):
+                    with self.assertRaises(robots.PrivateAddressBlocked) as ctx:
+                        robots.fetch_robots("http://{}".format(host), 5, False)
+                    self.assertIn(address, str(ctx.exception))
+                    self.assertIn("--allow-private", str(ctx.exception))
+
     def test_redirect_to_internal_address_rejected(self):
         # 1段目のホストは公開アドレスとして扱い（mock）、実際にはローカルのサーバーにつなぐ。
         # サーバーが 127.0.0.1 へのリダイレクトを返したあとは、internal_address を本来の判定に戻す
@@ -1217,6 +1378,141 @@ class FetchTest(unittest.TestCase):
         self.assertEqual(code, 2, err.getvalue())
         self.assertEqual(out.getvalue(), "")
         self.assertIn("typo.kakuu-coffee.example", err.getvalue())
+
+    # --- 名前はあるがアドレスがない（EAI_NODATA） ---
+
+    @unittest.skipUnless(hasattr(socket, "EAI_NODATA"), "この環境の socket に EAI_NODATA がない")
+    def test_first_host_without_address_is_input_error(self):
+        # Linux の glibc は、名前はあるがアドレスのレコードがない（apex に A レコードがない）と EAI_NODATA を返す。
+        # 打ち間違いと同じく、全拒否の表を出さずに終了コード 2 で止める
+        nodata = _gaierror("EAI_NODATA", "No address associated with hostname")
+        for allow_private in (True, False):
+            with self.subTest(allow_private=allow_private):
+                with self.patched_dns({"apex.kakuu-coffee.example": nodata}):
+                    with self.assertRaises(robots.InputError) as ctx:
+                        robots.fetch_robots("https://apex.kakuu-coffee.example", 5, allow_private)
+                self.assertIn("apex.kakuu-coffee.example の名前解決ができません", str(ctx.exception))
+        with self.patched_dns({"apex.kakuu-coffee.example": nodata}), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = robots.main(["--url", "https://apex.kakuu-coffee.example", "--crawlers", CRAWLERS_CSV])
+        self.assertEqual(code, 2, err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+
+    def test_name_not_found_without_nodata_constant(self):
+        # EAI_NODATA のない環境（定数が定義されていない）でも落ちず、EAI_NONAME は今までどおり見つからない扱い
+        saved = getattr(socket, "EAI_NODATA", None)
+        if saved is not None:
+            del socket.EAI_NODATA
+        try:
+            self.assertTrue(robots._name_not_found(_gaierror("EAI_NONAME", "not known")))
+            self.assertFalse(robots._name_not_found(_gaierror("EAI_AGAIN", "temporary failure")))
+            self.assertFalse(robots._name_not_found(socket.gaierror(-12345, "other")))
+        finally:
+            if saved is not None:
+                socket.EAI_NODATA = saved
+
+    # --- 取得全体の締め切り ---
+
+    def test_total_timeout(self):
+        # 取得全体の締め切りは --timeout の 3 倍か 30 秒の長いほう
+        self.assertEqual(robots.total_timeout(1.0), 30.0)
+        self.assertEqual(robots.total_timeout(10.0), 30.0)
+        self.assertEqual(robots.total_timeout(20.0), 60.0)
+        self.assertEqual(robots.total_timeout(600.0), 1800.0)
+
+    def drip_fetch(self, respond, timeout=0.5):
+        """1回の操作のタイムアウトより短い間隔で送り続けるサーバーから取得する（締め切りは timeout の 3 倍）。"""
+        peer = _RawPeer(respond)
+        self.addCleanup(peer.close)
+        t0 = time.monotonic()
+        with mock.patch.object(robots, "MIN_TOTAL_TIMEOUT", 0.0):
+            state = robots.fetch_robots(peer.url(), timeout, True)
+        return state, time.monotonic() - t0
+
+    def test_slow_drip_headers_hit_total_deadline(self):
+        # 状態行とヘッダーを 0.08 秒に1バイトずつ送る（全部で約 8 秒）。1回の操作は 0.5 秒で切れないが、
+        # 取得全体の締め切り（1.5 秒）で止めて全拒否（取得できず）にする
+        state, elapsed = self.drip_fetch(_drip(_ok_response(), 0.08))
+        self.assertEqual(state["state"], "unreachable", state)
+        self.assertIn("タイムアウト", state["detail"])
+        self.assertIn("取得全体で 1.5 秒", state["detail"])  # --timeout 0.5 の 3 倍
+        self.assertGreaterEqual(elapsed, 1.4)  # 1回の操作のタイムアウト（0.5 秒）ではなく、取得全体の締め切りで止まる
+        self.assertLess(elapsed, 4.0)
+
+    def test_slow_drip_body_hits_total_deadline(self):
+        # ヘッダーはすぐ送り、本文を1バイトずつ送る。途中まで読んだ本文で判定しない
+        body = b"User-agent: *\nAllow: /\n" + b"# " + b"x" * 80 + b"\n"
+        head = _ok_response(body)[:-len(body)]
+
+        def respond(conn, path, stopped):
+            conn.sendall(head)
+            _drip(body, 0.08)(conn, path, stopped)
+
+        state, elapsed = self.drip_fetch(respond)
+        self.assertEqual(state["state"], "unreachable", state)
+        self.assertIn("取得全体", state["detail"])
+        self.assertEqual(state["text"], "")
+        self.assertLess(elapsed, 4.0)
+
+    def test_slow_redirect_chain_hits_total_deadline(self):
+        # 1段ごとは 0.35 秒（1回の操作のタイムアウト 0.5 秒より短い）でも、5回のリダイレクトが積み上がれば締め切りで止める
+        def respond(conn, path, stopped):
+            time.sleep(0.35)
+            step = 0 if path == "/robots.txt" else int(path.rsplit("/", 1)[-1])
+            if step < 5:
+                conn.sendall("HTTP/1.1 301 Moved\r\nLocation: /hop/{}\r\nContent-Length: 0\r\nConnection: close\r\n"
+                             "\r\n".format(step + 1).encode("ascii"))
+            else:
+                conn.sendall(_ok_response())
+
+        state, elapsed = self.drip_fetch(respond)
+        self.assertEqual(state["state"], "unreachable", state)
+        self.assertIn("取得全体", state["detail"])
+        self.assertLess(elapsed, 4.0)
+
+    def test_fast_fetch_within_deadline(self):
+        # 締め切りの中で終わる取得は今までどおり
+        peer = _RawPeer(lambda conn, path, stopped: conn.sendall(_ok_response()))
+        self.addCleanup(peer.close)
+        state = robots.fetch_robots(peer.url(), 5, True)
+        self.assertEqual((state["state"], state["code"]), ("ok", 200))
+
+    # --- 1xx の中間の応答 ---
+
+    def interim_fetch(self, interim):
+        peer = _RawPeer(lambda conn, path, stopped: conn.sendall(interim + _ok_response()))
+        self.addCleanup(peer.close)
+        return robots.fetch_robots(peer.url(), 5, True)
+
+    def test_interim_responses_are_skipped(self):
+        # 103 Early Hints などの中間の応答は読み飛ばし、そのあとの最終の応答（200）の本文を判定する
+        cases = [
+            ("103", b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload; as=style\r\n\r\n"),
+            ("102", b"HTTP/1.1 102 Processing\r\n\r\n"),
+            ("100", b"HTTP/1.1 100 Continue\r\n\r\n"),
+            ("100+103", b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\n"
+                        b"HTTP/1.1 103 Early Hints\r\nLink: </b.css>\r\n\r\n"),
+        ]
+        for name, interim in cases:
+            with self.subTest(interim=name):
+                state = self.interim_fetch(interim)
+                self.assertEqual((state["state"], state["code"]), ("ok", 200), state)
+                self.assertEqual(len(robots.robots_groups(state)), 1)
+                rows = robots.evaluate(state, [crawler("GPTBot"), crawler("CCBot", "dataset")], ["/"])
+                self.assertEqual([r["verdict"] for r in rows], ["拒否", "許可"])
+
+    def test_switching_protocols_is_final(self):
+        # 101（プロトコルの切り替え）は最終の応答なので読み飛ばさず、2xx ではない応答として全拒否（取得できず）にする
+        state = self.interim_fetch(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n")
+        self.assertEqual((state["state"], state["code"]), ("unreachable", 101), state)
+        self.assertEqual(state["text"], "")
+
+    def test_too_many_interim_responses(self):
+        # 中間の応答が際限なく続くサーバーでは止まらずに、全拒否（取得できず）にする
+        state = self.interim_fetch(b"HTTP/1.1 103 Early Hints\r\n\r\n" * 200)
+        self.assertEqual(state["state"], "unreachable", state)
+        self.assertIn("中間の応答", state["detail"])
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1717,103 @@ class MainTest(TempDirCase):
         self.assertTrue(data.startswith(b"operator,token,category,path,verdict,matched_group,matched_rule,note\r\n"))
         self.assertEqual(data.count(b"\r\n"), 7)
         stream.detach()
+
+    def test_stdout_in_cp932_does_not_crash_in_process(self):
+        # Windows でパイプやファイルにつないだ標準出力（cp932）を模す。cp932 にない文字（é、–）があっても落ちず、
+        # UTF-8 のバイト列で書く（-o で書くファイルと同じ UTF-8）
+        path = self.write("robots.txt", self.ROBOTS)
+        for fmt in ("md", "csv"):
+            with self.subTest(format=fmt):
+                buffer = io.BytesIO()
+                stream = io.TextIOWrapper(buffer, encoding="cp932", errors="strict", write_through=True)
+                with mock.patch("sys.stdout", stream), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                    code = robots.main(["--file", path, "--crawlers", CRAWLERS_CSV, "--format", fmt,
+                                        "--paths", "/café/,/news/2026–10/"])
+                stream.detach()
+                self.assertEqual(code, 0, err.getvalue())
+                out = buffer.getvalue().decode("utf-8")
+                self.assertIn("/café/", out)
+                self.assertIn("/news/2026–10/", out)
+
+    def test_stdout_in_cp932_does_not_crash(self):
+        # 別プロセスで PYTHONIOENCODING=cp932（日本語版 Windows でパイプにつないだときの既定を模す）
+        path = self.write("robots–copy.txt", self.ROBOTS)
+        env = dict(os.environ, PYTHONIOENCODING="cp932")
+        env.pop("PYTHONUTF8", None)
+        for fmt in ("md", "csv"):
+            with self.subTest(format=fmt):
+                cmd = [sys.executable, "-B", os.path.join(helpers.SCRIPTS, "ai_robots_check.py"), "--file", path,
+                       "--crawlers", CRAWLERS_CSV, "--format", fmt, "--paths", "/café/"]
+                result = subprocess.run(cmd, cwd=self.tmp, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.assertEqual(result.returncode, 0, result.stderr.decode("cp932", errors="replace"))
+                out = result.stdout.decode("utf-8")
+                self.assertIn("/café/", out)
+                self.assertNotIn(b"Traceback", result.stderr)
+                if fmt == "md":
+                    self.assertIn("robots–copy.txt", out)
+                else:
+                    self.assertEqual(out.count("\r\n"), 7)
+
+    def test_output_same_as_input_is_rejected(self):
+        # -o が入力のファイルと同じなら、入力を報告で上書きせずに終了コード 2 で止める
+        path = self.write("r2.txt", self.ROBOTS)
+        crawlers = self.write("c.csv", HEADER + "OpenAI,GPTBot,training,,,,,2026-09-26\n")
+        cases = [
+            (["--file", path, "--crawlers", CRAWLERS_CSV, "-o", path], path, "--file"),
+            (["--file", path, "--crawlers", CRAWLERS_CSV, "--format", "csv", "-o", path], path, "--file"),
+            (["--file", path, "--crawlers", crawlers, "-o", crawlers], crawlers, "--crawlers"),
+            # 相対パスと絶対パスのように書き方が違っても、同じファイルなら止める
+            (["--file", "r2.txt", "--crawlers", CRAWLERS_CSV, "-o", os.path.join(".", "r2.txt")], path, "--file"),
+        ]
+        for args, target, flag in cases:
+            with self.subTest(args=args):
+                with open(target, "rb") as f:
+                    before = f.read()
+                result = self.run_main(args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("-o の出力先が {} のファイルと同じ".format(flag), result.stderr)
+                self.assertEqual(result.stdout, "")
+                with open(target, "rb") as f:
+                    self.assertEqual(f.read(), before)
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "シンボリックリンクを作れる POSIX だけ")
+    def test_output_symlink_to_input_is_rejected(self):
+        path = self.write("robots.txt", self.ROBOTS)
+        link = os.path.join(self.tmp, "link.md")
+        os.symlink(path, link)
+        result = self.run_main(["--file", path, "--crawlers", CRAWLERS_CSV, "-o", link])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), self.ROBOTS)
+
+    def test_output_other_file_is_written(self):
+        path = self.write("robots.txt", self.ROBOTS)
+        out = os.path.join(self.tmp, "report.md")
+        self.write("report.md", "古い報告\n")
+        result = self.run_main(["--file", path, "--crawlers", CRAWLERS_CSV, "-o", out])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out, encoding="utf-8") as f:
+            self.assertIn("# AI クローラーの robots.txt 判定", f.read())
+
+    def test_malformed_host_is_input_error(self):
+        # 二重のドットなどの打ち間違いを、全拒否の表（終了コード 0）として報告しない
+        for url in ("https://example..com", "https://" + "a" * 64 + ".com"):
+            with self.subTest(url=url):
+                result = self.run_main(["--url", url, "--crawlers", CRAWLERS_CSV, "--format", "csv"])
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("ホスト名", result.stderr)
+
+    def test_idna_deviation_host_is_input_error(self):
+        result = self.run_main(["--url", "https://faß.de", "--crawlers", CRAWLERS_CSV])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("IDNA", result.stderr)
+
+    def test_help_describes_total_timeout(self):
+        result = self.run_main(["--help"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("取得全体", "".join(result.stdout.split()))  # 折り返しの改行と空白を除いて比べる
 
     def test_utf16_file_cli(self):
         path = self.write("robots.txt", "User-agent: GPTBot\r\nDisallow: /\r\n".encode("utf-16"))

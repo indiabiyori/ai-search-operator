@@ -71,7 +71,7 @@ The skill never automates or scrapes AI services. The terms of ChatGPT, Claude, 
 
 ## Tests
 
-All 548 tests passed on macOS with Python 3.9.6 (`/usr/bin/python3`), 3.9.25, 3.11.15, 3.13.13, and 3.14.7 (2026-09-27). GitHub Actions runs the same tests on Ubuntu with Python 3.9 and 3.13 on every push to main and every pull request. Python 3.10, 3.12, and Windows have not been tested. See [tests/README.md](tests/README.md) (in Japanese) for how to run them. Five evals in [evals/](evals/) check when the skill is triggered and that it gives no rates without recorded answers; they use model credits, so they are run by hand with `claude plugin eval`, not in CI.
+All 659 tests passed on macOS with Python 3.9.6 (`/usr/bin/python3`), 3.9.25, 3.11.15, 3.13.13, and 3.14.7 (2026-09-27). GitHub Actions runs the same tests on Ubuntu 24.04 with Python 3.9 and 3.13 on every push to main and every pull request. Python 3.10, 3.12, and Windows have not been tested. See [tests/README.md](tests/README.md) (in Japanese) for how to run them. Five evals in [evals/](evals/) check when the skill is triggered and that it gives no rates without recorded answers; they use model credits, so they are run by hand with `claude plugin eval`, not in CI.
 
 ## Limitations
 

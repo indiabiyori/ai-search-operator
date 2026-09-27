@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -916,6 +917,26 @@ class MainTest(TempDirCase):
     def read_rows(self, path):
         return common.read_csv(path)[1]
 
+    @unittest.skipIf(not hasattr(os, "symlink") or sys.platform.startswith("win"), "シンボリックリンクを作れない環境")
+    def test_symlinked_outputs_update_link_target(self):
+        # 一時ファイルに書いてから置き換える方式で、リンクそのものを普通のファイルに変えない
+        ws = self.copy_workspace()
+        shared = os.path.join(self.tmp, "shared")
+        os.makedirs(shared)
+        for name in ("observations.csv", "citations.csv", "observations.run.json"):
+            target = os.path.join(shared, name)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("old\n")
+            os.symlink(target, os.path.join(ws, name))
+        result = self.run_main([])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("observations.csv", "citations.csv", "observations.run.json"):
+            link = os.path.join(ws, name)
+            self.assertTrue(os.path.islink(link), name)
+            with open(os.path.join(shared, name), encoding="utf-8-sig") as f:
+                self.assertNotEqual(f.read(), "old\n", name)
+        self.assertEqual(len(self.read_rows(os.path.join(shared, "observations.csv"))), 7)
+
     def test_fixture_workspace(self):
         # Review Focus 1 の確認が git の改行の変換で消えていないこと（消えていればここで落とす）
         with open(os.path.join(WORKSPACE, "answers", "2026-10-01", "chatgpt", "P001-2.md"), "rb") as f:
@@ -1311,6 +1332,582 @@ class ModeWarningTest(TempDirCase):
         self.add("P001-2", mode="自動")
         _rows, err = self.run_rows()
         self.assertIn("警告のある回答: 0 件", err)
+
+
+def _entities(tmp, own_domains, comp_domains="sample-roast.example"):
+    """ドメインだけを変えた entities.csv を書いて load_entities で読む（ドメインの正規化も通す）。"""
+    path = os.path.join(tmp, "entities-{}.csv".format(len(os.listdir(tmp))))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("entity_id,kind,name,terms,exclude_terms,domains\n"
+                "own-company,own,架空珈琲,架空珈琲|kakuucoffee,,{}\n"
+                "comp-a,competitor,サンプル焙煎,サンプル焙煎,,{}\n".format(own_domains, comp_domains))
+    return common.load_entities(path)
+
+
+class IdnDomainTest(TempDirCase):
+    """日本語ドメイン（IDN）。Unicode 表記と Punycode 表記のどちらで書いても同じホストとして照合する。"""
+    UNICODE = "架空珈琲.jp"
+    PUNYCODE = "xn--6tvq2ydjak8s.jp"
+
+    def test_normalize_url_host_is_ascii(self):
+        self.assertEqual(norm.normalize_url("https://架空珈琲.jp/a")[1], self.PUNYCODE)
+        self.assertEqual(norm.normalize_url("https://WWW.架空珈琲.JP/a")[1], "www." + self.PUNYCODE)
+        self.assertEqual(norm.normalize_url("https://xn--6tvq2ydjak8s.jp/a")[1], self.PUNYCODE)
+
+    def test_unicode_domain_matches_punycode_urls(self):
+        ents = _entities(self.tmp, self.UNICODE)
+        sources = "1. https://xn--6tvq2ydjak8s.jp/\n2. https://www.xn--6tvq2ydjak8s.jp/menu"
+        row, cits, _ = self.process(answer_text(sources=sources), entities=ents)
+        self.assertEqual(row["own_cited"], 1)
+        self.assertEqual([c["entity_kind"] for c in cits], ["own", "own"])
+        self.assertEqual([c["host"] for c in cits], [self.PUNYCODE, "www." + self.PUNYCODE])
+
+    def test_punycode_domain_matches_unicode_urls(self):
+        ents = _entities(self.tmp, self.PUNYCODE)
+        sources = "1. https://架空珈琲.jp/\n2. https://www.架空珈琲.jp/menu"
+        row, cits, _ = self.process(answer_text(sources=sources), entities=ents)
+        self.assertEqual(row["own_cited"], 1)
+        self.assertEqual([c["entity_kind"] for c in cits], ["own", "own"])
+        self.assertEqual(row["source_count"], 2)
+
+    def test_same_page_in_both_forms_counted_once(self):
+        ents = _entities(self.tmp, self.PUNYCODE)
+        sources = "1. https://架空珈琲.jp/menu\n2. https://xn--6tvq2ydjak8s.jp/menu"
+        row, cits, _ = self.process(answer_text(sources=sources), entities=ents)
+        self.assertEqual(row["source_count"], 1)
+        self.assertEqual(len(cits), 1)
+
+    def test_domain_label_in_either_form_removed(self):
+        for label in (self.UNICODE, self.PUNYCODE):
+            with self.subTest(label=label):
+                text = "人気です。 [{}](https://xn--6tvq2ydjak8s.jp/a) 以上".format(label)
+                self.assertNotIn(label, norm.strip_urls(text))
+
+
+class DomainFormCliTest(TempDirCase):
+    """entities.csv のドメインの書き方の誤り（#2）。黙って引用 0 にせず、理由付きで止めるか、正規化して数える。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.ws = os.path.join(self.tmp, "ai-search")
+        shutil.copytree(WORKSPACE, self.ws)
+
+    def set_own_domains(self, domains):
+        path = os.path.join(self.ws, "entities.csv")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(",,kakuu-coffee.example\n", ",,{}\n".format(domains)))
+
+    def run_main(self):
+        return helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+
+    def test_wildcard_domain_is_input_error(self):
+        self.set_own_domains("*.kakuu-coffee.example")
+        result = self.run_main()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("ワイルドカード", result.stderr)
+        self.assertIn("*.kakuu-coffee.example", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_fullwidth_domain_is_normalized(self):
+        self.set_own_domains("ｋａｋｕｕ-coffee．example")
+        result = self.run_main()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {r["answer_file"]: r for r in common.read_csv(os.path.join(self.ws, "observations.csv"))[1]}
+        self.assertEqual(rows["answers/2026-10-01/chatgpt/P001-1.md"]["own_cited"], "1")
+        self.assertIn("自社の引用: 2/4", result.stderr)
+
+
+class RefDefinitionTitleTest(TempDirCase):
+    """参照形式の定義の行のタイトルに \\" や入れ子のかっこがあっても、行ごと消す（#4）。"""
+    ANSWER = "水出しなら中深煎りがおすすめです。([sample-roast.example][1])\n\n"
+    TITLES = (
+        '"\\"水出し\\"の極意 | サンプル焙煎"',  # CommonMark で正しいエスケープ
+        '"サンプル焙煎の "水出し" ブレンド"',  # 生の " を含む
+        "(サンプル焙煎 (公式))",  # 入れ子のかっこ
+        "'サンプル焙煎の \\'水出し\\''",  # シングルクォートの中の \\'
+        "サンプル焙煎 公式サイト",  # 引用符のないタイトル
+    )
+
+    def test_definition_line_removed_whatever_the_title(self):
+        for title in self.TITLES:
+            text = self.ANSWER + "[1]: https://sample-roast.example/?utm_source=chatgpt.com " + title
+            with self.subTest(title=title):
+                out = norm.strip_urls(text)
+                self.assertNotIn("サンプル焙煎", out)
+                self.assertNotIn("[1]:", out)
+                self.assertIn("水出しなら中深煎りがおすすめです。", out)
+                self.assertEqual(norm.extract_urls(text), ["https://sample-roast.example/?utm_source=chatgpt.com"])
+                row, cits, _ = self.process(answer_text(answer=text, sources=None))
+                self.assertEqual(row["competitors_mentioned"], "")
+                self.assertEqual(row["competitors_cited"], "comp-a")
+
+    def test_reference_use_resolves_through_escaped_definition(self):
+        text = "[ガイド][1] を参照\n\n" + '[1]: https://coffee-guide.example/a "\\"架空珈琲\\" の特集"'
+        out = norm.strip_urls(text)
+        self.assertIn("ガイド", out)
+        self.assertNotIn("架空珈琲", out)
+
+    def test_inline_link_title_with_escaped_quotes_removed(self):
+        text = '[ガイド](https://coffee-guide.example/a "\\"架空珈琲\\" の特集")の記事'
+        self.assertEqual(norm.extract_urls(text), ["https://coffee-guide.example/a"])
+        out = norm.strip_urls(text)
+        self.assertIn("ガイド", out)
+        self.assertIn("の記事", out)
+        self.assertNotIn("架空珈琲", out)
+
+    def test_title_right_after_url_without_space(self):
+        # 空白なしでタイトルが続く定義の行も、行ごと消す。URL はタイトルの手前で終わる（URL_RE と同じ文字で切る）
+        url = "https://sample-roast.example/?utm_source=chatgpt.com"
+        for tail in ('"サンプル焙煎 公式"', "「サンプル焙煎」の特集", "（サンプル焙煎 公式）"):
+            for dest in (url, "<" + url + ">"):
+                text = self.ANSWER + "[1]: " + dest + tail
+                with self.subTest(dest=dest, tail=tail):
+                    out = norm.strip_urls(text)
+                    self.assertNotIn("サンプル焙煎", out)
+                    self.assertNotIn("[1]:", out)
+                    self.assertIn("水出しなら中深煎りがおすすめです。", out)
+                    self.assertEqual(norm.extract_urls(text), [url])
+                    row, _cits, _ = self.process(answer_text(answer=text, sources=None))
+                    self.assertEqual(row["competitors_mentioned"], "")
+                    self.assertEqual(row["competitors_cited"], "comp-a")
+
+
+class TopPageCutTest(TempDirCase):
+    """出典の欄にトップページしかないとき、本文の日本語のパスの URL をトップページで切らない（#5）。"""
+
+    def test_japanese_path_not_cut_at_top_page(self):
+        answer = "比較記事 https://kakuu-coffee.example/サンプル焙煎との違い/ を参考にしました。"
+        for source in ("https://kakuu-coffee.example/", "https://kakuu-coffee.example"):
+            with self.subTest(source=source):
+                row, cits, _ = self.process(answer_text(answer=answer, sources="1. " + source))
+                self.assertEqual(row["competitors_mentioned"], "")
+                self.assertEqual([(c["location"], c["url"]) for c in cits],
+                                 [("sources", "https://kakuu-coffee.example/"),
+                                  ("body", "https://kakuu-coffee.example/サンプル焙煎との違い/")])
+
+    def test_reverse_case_is_not_an_own_mention(self):
+        answer = "比較記事 https://sample-roast.example/架空珈琲との比較/ を参考にしました。"
+        row, _cits, _ = self.process(answer_text(answer=answer, sources="1. https://sample-roast.example/"))
+        self.assertEqual(row["own_mentioned"], 0)
+
+    def test_known_url_with_path_still_cuts(self):
+        known = ["https://coffee-guide.example/x/"]
+        self.assertEqual(norm.extract_urls("https://coffee-guide.example/x/架空珈琲", known_urls=known),
+                         ["https://coffee-guide.example/x/架空珈琲"])
+        known = ["https://coffee-guide.example/x"]
+        self.assertEqual(norm.extract_urls("https://coffee-guide.example/x架空珈琲", known_urls=known),
+                         ["https://coffee-guide.example/x"])
+
+
+class SecondAnswerHeadingTest(TempDirCase):
+    """2つ目の回答の見出し（#6）。その下を捨てず回答の欄に残し、警告する。"""
+
+    def test_split_sections_keeps_text_after_second_answer_heading(self):
+        body = "## 回答\n## 質問\n水出しに向く豆は？\n## 回答\n架空珈琲の中深煎りがおすすめです。\n## 出典\nhttps://a.example/\n"
+        answer, sources = norm.split_sections(body)
+        self.assertIn("架空珈琲の中深煎りがおすすめです。", answer)
+        self.assertEqual(sources.strip(), "https://a.example/")
+
+    def test_second_answer_heading_counted_and_warned(self):
+        for heading in ("## 回答", "## Answer"):
+            answer = "## 質問\n水出しに向く豆は？\n{}\n架空珈琲の中深煎りがおすすめです。".format(heading)
+            with self.subTest(heading=heading):
+                row, _cits, warnings = self.process(answer_text(answer=answer))
+                self.assertEqual(row["own_mentioned"], 1)
+                self.assertTrue(any("回答の見出しが 2 つあります" in w for w in warnings), warnings)
+
+    def test_second_answer_after_sources_is_kept_and_warned(self):
+        text = answer_text(answer="専門店の豆が人気です。", sources="1. https://x.example/")
+        text += "\n## 回答\n架空珈琲も人気です。\n"
+        row, _cits, warnings = self.process(text)
+        self.assertEqual(row["own_mentioned"], 1)
+        self.assertTrue(any("回答の見出しが 2 つあります" in w for w in warnings), warnings)
+
+    def test_single_answer_heading_not_warned(self):
+        _row, _cits, warnings = self.process(answer_text())
+        self.assertFalse(any("回答の見出し" in w for w in warnings), warnings)
+
+
+class PercentEncodingTest(TempDirCase):
+    """パーセントエンコードの違いだけの URL は同じ出典として1回だけ数える（#7）。"""
+    ENCODED = "https://kakuu-coffee.example/%E3%83%A1%E3%83%8B%E3%83%A5%E3%83%BC"
+    DECODED = "https://kakuu-coffee.example/メニュー"
+
+    def test_encoded_and_decoded_counted_once(self):
+        sources = "1. {}\n2. {}\n3. https://sample-roast.example/".format(self.ENCODED, self.DECODED)
+        row, cits, _ = self.process(answer_text(sources=sources))
+        self.assertEqual(row["source_count"], 2)
+        self.assertEqual(row["own_cited_urls"], self.ENCODED)
+        self.assertEqual([c["url"] for c in cits], [self.ENCODED, "https://sample-roast.example/"])
+
+    def test_hex_case_ignored(self):
+        sources = "1. {}\n2. {}".format(self.ENCODED, self.ENCODED.lower())  # %E3 と %e3
+        row, _cits, _ = self.process(answer_text(sources=sources))
+        self.assertEqual(row["source_count"], 1)
+
+    def test_body_and_sources_in_different_forms_counted_once(self):
+        answer = "詳しくは {} を見てください。".format(self.DECODED)
+        row, cits, _ = self.process(answer_text(answer=answer, sources="1. " + self.ENCODED))
+        self.assertEqual([c["location"] for c in cits], ["sources"])
+
+    def test_first_source_order_not_shifted(self):
+        sources = "1. https://sample-roast.example/%E3%81%82\n2. https://sample-roast.example/あ\n3. {}".format(
+            self.ENCODED)
+        row, _cits, _ = self.process(answer_text(sources=sources))
+        self.assertEqual(row["own_first_source_order"], 2)
+
+    def test_reserved_characters_stay_distinct(self):
+        # %2F（/）や %3F（?）はデコードしない。別のパスとして数える
+        sources = "1. https://a.example/x%2Fy\n2. https://a.example/x/y\n3. https://a.example/p%3Fq"
+        row, _cits, _ = self.process(answer_text(sources=sources))
+        self.assertEqual(row["source_count"], 3)
+
+
+class RedirectLabelTest(unittest.TestCase):
+    """行き先のわからないリダイレクトのリンクでも、ドメインだけの文字は消す（#8）。"""
+
+    def test_domain_label_of_unresolved_redirect_removed(self):
+        for url in ("https://vertexaisearch.cloud.google.com/grounding-api-redirect/AbC",
+                    "https://bit.ly/x", "https://www.google.com/url?sa=t"):
+            with self.subTest(url=url):
+                out = norm.strip_urls("詳しくは[kakuucoffee.example]({})を参照".format(url))
+                self.assertNotIn("kakuucoffee", out)
+                self.assertIn("詳しくは", out)
+                self.assertIn("を参照", out)
+                out = norm.strip_urls("詳しくは[kakuucoffee.example][1]を参照\n\n[1]: {}".format(url))
+                self.assertNotIn("kakuucoffee", out)
+
+    def test_text_label_of_unresolved_redirect_kept(self):
+        url = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AbC"
+        self.assertIn("架空珈琲", norm.strip_urls("[架空珈琲]({})の豆".format(url)))
+
+
+class RepeatDigitsTest(TempDirCase):
+    """桁数の多い repeat は値が不正として無効にする。例外で止めない（#20）。"""
+
+    def test_parse_repeat_rejects_huge_numbers(self):
+        self.assertIsNone(norm._parse_repeat("1" + "0" * 5000))
+        self.assertIsNone(norm._parse_repeat("1234567"))
+        self.assertEqual(norm._parse_repeat("003"), "3")
+        self.assertEqual(norm._parse_repeat("１２"), "12")
+
+    def test_huge_repeat_makes_answer_invalid(self):
+        row, _cits, warnings = self.process(answer_text(meta={"repeat": "1" + "0" * 5000}))
+        self.assertEqual(row["valid_mention"], 0)
+        self.assertIn("値が不正: repeat", row["exclusion_reason"])
+        self.assertTrue(any("repeat の値が不正です" in w for w in warnings), warnings)
+
+
+class PortParsingTest(unittest.TestCase):
+    """ポートは Python の版に頼らず読む。ASCII の数字だけを受け付ける（#28）。"""
+
+    def test_non_ascii_or_signed_ports_unresolved_on_every_version(self):
+        for port in ("+443", "4_43", "４４３", "٤٤٣", "65536", "-1", " 443", "443a"):
+            url = "https://kakuu-coffee.example:{}/menu".format(port)
+            with self.subTest(port=port):
+                self.assertEqual(norm.normalize_url(url), (url, "", True))
+
+    def test_bracketed_non_ip_host_unresolved(self):
+        for url in ("https://[kakuu-coffee.example]/", "https://[192.0.2.1]/"):
+            with self.subTest(url=url):
+                self.assertEqual(norm.normalize_url(url), (url, "", True))
+
+    def test_valid_ports(self):
+        self.assertEqual(norm.normalize_url("https://a.example:00443/x"), ("https://a.example/x", "a.example", False))
+        self.assertEqual(norm.normalize_url("https://a.example:/x"), ("https://a.example/x", "a.example", False))
+        self.assertEqual(norm.normalize_url("http://a.example:65535/"),
+                         ("http://a.example:65535/", "a.example", False))
+        self.assertEqual(norm.normalize_url("https://user@a.example:8443/x"),
+                         ("https://a.example:8443/x", "a.example", False))
+        self.assertEqual(norm.normalize_url("http://[2001:db8::1]:8080/x"),
+                         ("http://[2001:db8::1]:8080/x", "2001:db8::1", False))
+        self.assertEqual(norm.normalize_url("http://[2001:DB8::1]/x"),
+                         ("http://[2001:db8::1]/x", "2001:db8::1", False))
+
+    def test_fullwidth_port_in_answer_is_unresolved(self):
+        urls = norm.extract_urls("詳しくは https://kakuu-coffee.example:４４３/menu を参照")
+        self.assertEqual(len(urls), 1)
+        self.assertTrue(norm.normalize_url(urls[0])[2])
+
+
+class NulCharacterTest(TempDirCase):
+    """回答ファイルと prompts.csv の NUL（#25、#29）。どの版でも normalize → compare が通る。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.ws = os.path.join(self.tmp, "ai-search")
+        shutil.copytree(WORKSPACE, self.ws)
+
+    def test_nul_in_answer_removed_and_warned(self):
+        row, _cits, warnings = self.process(answer_text(answer="架空\x00珈琲の豆が人気です。"))
+        self.assertEqual(row["own_mentioned"], 1)
+        self.assertNotIn("\x00", row["own_mention_snippet"])
+        self.assertTrue(any("NUL" in w for w in warnings), warnings)
+
+    def test_nul_in_answer_file_then_compare(self):
+        path = os.path.join(self.ws, "answers", "2026-10-01", "chatgpt", "P001-1.md")
+        with open(path, "rb") as f:
+            data = f.read()
+        with open(path, "wb") as f:
+            f.write(data.replace("架空珈琲（KAKUU COFFEE）".encode("utf-8"), "架空珈琲\x00（KAKUU COFFEE）".encode("utf-8")))
+        result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NUL", result.stderr)
+        for name in ("observations.csv", "citations.csv"):
+            with open(os.path.join(self.ws, name), "rb") as f:
+                self.assertNotIn(b"\x00", f.read(), name)
+        report = os.path.join(self.tmp, "report.md")
+        result = helpers.run_script("compare_runs", ["--workspace", self.ws, "--period", "2026-10-01", "-o", report],
+                                    cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_nul_in_prompts_intent_group(self):
+        path = os.path.join(self.ws, "prompts.csv")
+        with open(path, "rb") as f:
+            data = f.read()
+        with open(path, "wb") as f:
+            f.write(data.replace("浅煎りの購入".encode("utf-8"), "浅煎りの購入\x00".encode("utf-8")))
+        result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(os.path.join(self.ws, "observations.csv"), "rb") as f:
+            raw = f.read()
+        self.assertNotIn(b"\x00", raw)
+        self.assertIn("浅煎りの購入".encode("utf-8"), raw)
+
+
+def _run_with_timeout(args, cwd, timeout=30):
+    cmd = [sys.executable, "-B", os.path.join(helpers.SCRIPTS, "normalize_observations.py")] + list(args)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    return subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True, encoding="utf-8", timeout=timeout)
+
+
+class AnswerFileKindTest(TempDirCase):
+    """回答ファイルは普通のファイルだけを、大きさの上限までで読む（#18）。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.ws = os.path.join(self.tmp, "ai-search")
+        shutil.copytree(WORKSPACE, self.ws)
+        self.folder = os.path.join(self.ws, "answers", "2026-10-01", "chatgpt")
+
+    def test_fifo_is_input_error_without_hanging(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("この環境では FIFO を作れない")
+        os.mkfifo(os.path.join(self.folder, "P001-8.md"))
+        try:
+            result = _run_with_timeout(["--workspace", self.ws], cwd=self.tmp)
+        except subprocess.TimeoutExpired:
+            self.fail("FIFO の回答ファイルで止まった")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("普通のファイルではありません", result.stderr)
+        self.assertIn("P001-8.md", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_link_to_device_is_input_error(self):
+        if not os.path.exists(os.devnull) or os.name == "nt":
+            self.skipTest("この環境にはデバイスファイルがない")
+        try:
+            os.symlink(os.devnull, os.path.join(self.folder, "P001-9.md"))
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("この環境ではシンボリックリンクを作れない")
+        result = _run_with_timeout(["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("普通のファイルではありません", result.stderr)
+
+    def test_too_large_answer_is_input_error(self):
+        path = self.write("answers/2026-10-01/chatgpt/P001-1.md", text=answer_text())
+        with mock.patch.object(norm, "MAX_ANSWER_BYTES", 100):
+            with self.assertRaises(common.InputError) as cm:
+                norm.process_answer(path, "answers/2026-10-01/chatgpt/P001-1.md", ENTITIES, PROMPTS)
+        self.assertIn("大きすぎます", str(cm.exception))
+        self.assertIn("P001-1.md", str(cm.exception))
+
+    def test_limit_is_5_mib_and_answer_at_the_limit_is_read(self):
+        self.assertEqual(norm.MAX_ANSWER_BYTES, 5 * 1024 * 1024)
+        text = answer_text()
+        size = len(text.encode("utf-8"))
+        path = self.write("answers/2026-10-01/chatgpt/P001-1.md", text=text)
+        with mock.patch.object(norm, "MAX_ANSWER_BYTES", size):
+            row, _cits, _ = norm.process_answer(path, "answers/2026-10-01/chatgpt/P001-1.md", ENTITIES, PROMPTS)
+        self.assertEqual(row["answer_sha256"], common.sha256_file(path)[:12])
+
+    def test_too_large_answer_cli_exit_2(self):
+        with open(os.path.join(self.folder, "P001-7.md"), "wb") as f:
+            f.write(answer_text(meta={"repeat": "7"}).encode("utf-8"))
+            f.write(b"x" * (5 * 1024 * 1024))
+        result = _run_with_timeout(["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("大きすぎます", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+
+class SymlinkFolderTest(TempDirCase):
+    """answers/ の中のフォルダへのシンボリックリンクもたどる（#17）。ループは実体のパスで避ける。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.ws = os.path.join(self.tmp, "ai-search")
+        shutil.copytree(WORKSPACE, self.ws)
+
+    def symlink(self, target, link):
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("この環境ではシンボリックリンクを作れない")
+
+    def rows(self):
+        result = _run_with_timeout(["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return common.read_csv(os.path.join(self.ws, "observations.csv"))[1], result.stderr
+
+    def test_linked_round_folder_is_read(self):
+        self.write("elsewhere/r2/chatgpt/P001-1.md", text=answer_text(meta={"round": "r2"}))
+        self.symlink(os.path.join(self.tmp, "elsewhere", "r2"), os.path.join(self.ws, "answers", "r2"))
+        rows, err = self.rows()
+        self.assertEqual(len(rows), 8)
+        self.assertIn("answers/r2/chatgpt/P001-1.md", [r["answer_file"] for r in rows])
+        self.assertIn("r2", err)
+
+    def test_link_loop_does_not_repeat(self):
+        self.symlink(os.path.join(self.ws, "answers"), os.path.join(self.ws, "answers", "2026-10-01", "loop"))
+        rows, _err = self.rows()
+        self.assertEqual(len(rows), 7)
+
+    def test_two_links_to_the_same_folder_read_once(self):
+        self.write("elsewhere/r2/chatgpt/P001-1.md", text=answer_text(meta={"round": "r2"}))
+        target = os.path.join(self.tmp, "elsewhere", "r2")
+        self.symlink(target, os.path.join(self.ws, "answers", "r2"))
+        self.symlink(target, os.path.join(self.ws, "answers", "r2-copy"))
+        rows, err = self.rows()
+        self.assertEqual(len(rows), 8)
+        self.assertIn("同じフォルダ", err)
+
+
+class AtomicOutputTest(TempDirCase):
+    """3つの出力は、すべて書けてから置き換える。途中で失敗したら古いファイルを残す（#19）。"""
+
+    def setUp(self):
+        TempDirCase.setUp(self)
+        self.ws = os.path.join(self.tmp, "ai-search")
+        shutil.copytree(WORKSPACE, self.ws)
+        result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.before = self.snapshot()
+        folder = os.path.join(self.ws, "answers", "2026-10-01", "chatgpt")
+        shutil.copy(os.path.join(folder, "P001-1.md"), os.path.join(folder, "P001-9.md"))
+
+    def snapshot(self):
+        out = {}
+        for name in ("observations.csv", "citations.csv", "observations.run.json"):
+            path = os.path.join(self.ws, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    out[name] = f.read()
+        return out
+
+    def leftovers(self):
+        return [n for n in os.listdir(self.ws) if n.endswith(".tmp")]
+
+    def test_second_output_not_writable_keeps_all_old_files(self):
+        if not hasattr(os, "geteuid") or os.geteuid() == 0:
+            self.skipTest("root か Windows では読み取り専用のファイルにも書けてしまう")
+        cit = os.path.join(self.ws, "citations.csv")
+        os.chmod(cit, 0o444)
+        try:
+            result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        finally:
+            os.chmod(cit, 0o644)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("citations.csv を書けません", result.stderr)
+        self.assertEqual(self.snapshot(), self.before)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_third_output_is_a_folder_keeps_all_old_files(self):
+        run = os.path.join(self.ws, "observations.run.json")
+        os.remove(run)
+        os.makedirs(run)
+        self.before.pop("observations.run.json")
+        result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("observations.run.json を書けません", result.stderr)
+        self.assertEqual(self.snapshot(), self.before)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_failure_while_replacing_keeps_later_files(self):
+        # 置き換えの途中の失敗（Windows で Excel が開いている、など）を模す
+        real_replace = os.replace
+        calls = []
+
+        def fake_replace(src, dst):
+            calls.append(os.path.basename(dst))
+            if os.path.basename(dst) == "citations.csv":
+                raise PermissionError(13, "Permission denied")
+            return real_replace(src, dst)
+
+        err = io.StringIO()
+        with mock.patch.object(norm.os, "replace", side_effect=fake_replace):
+            with contextlib.redirect_stderr(err):
+                code = norm.main(["--workspace", self.ws])
+        self.assertEqual(code, 2, err.getvalue())
+        self.assertIn("citations.csv を書けません", err.getvalue())
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(calls[0], "observations.csv")
+        after = self.snapshot()
+        for name in ("citations.csv", "observations.run.json"):
+            self.assertEqual(after[name], self.before[name], name)
+
+    def test_success_leaves_no_temporary_files(self):
+        result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(len(common.read_csv(os.path.join(self.ws, "observations.csv"))[1]), 8)
+
+
+class SurrogateNameTest(TempDirCase):
+    """UTF-8 でない名前のファイル（Linux の ext4 など）で、traceback を出して止まらない（#24）。"""
+
+    def test_printable(self):
+        self.assertEqual(norm._printable("2026-10-\udcff01/chatgpt/P001-1.md"),
+                         "2026-10-\\udcff01/chatgpt/P001-1.md")
+        self.assertEqual(norm._printable("架空珈琲/P001-1.md"), "架空珈琲/P001-1.md")
+
+    def test_list_answer_files_makes_names_printable(self):
+        # macOS の APFS では UTF-8 でない名前のファイルを作れないので、os.walk の結果を差し替えて確かめる
+        answers = os.path.join(self.tmp, "answers")
+        walked = [(answers, ["2026-10-\udcff01"], []),
+                  (os.path.join(answers, "2026-10-\udcff01", "chatgpt"), [], ["P001-\udcff.md", "memo.txt"])]
+        with mock.patch.object(norm.os, "walk", return_value=iter(walked)):
+            found = norm._list_answer_files(answers)
+        self.assertEqual(found, [(os.path.join(answers, "2026-10-\udcff01", "chatgpt", "P001-\udcff.md"),
+                                  "2026-10-\\udcff01/chatgpt/P001-\\udcff.md")])
+        found[0][1].encode("utf-8")  # CSV に UTF-8 で書ける
+
+    def test_unicode_error_while_writing_is_input_error(self):
+        def write():
+            "\udcff".encode("utf-8")
+
+        with self.assertRaises(common.InputError) as cm:
+            norm._write_output("/tmp/x/observations.csv", write)
+        self.assertIn("observations.csv を書けません", str(cm.exception))
+
+    def test_undecodable_file_name(self):
+        ws = os.path.join(self.tmp, "ai-search")
+        shutil.copytree(WORKSPACE, ws)
+        folder = os.path.join(ws, "answers", "2026-10-01", "chatgpt")
+        try:
+            with open(os.path.join(os.fsencode(folder), b"P001-\xff.md"), "wb") as f:
+                with open(os.path.join(folder, "P001-1.md"), "rb") as src:
+                    f.write(src.read())
+        except OSError:
+            self.skipTest("このファイルシステムは UTF-8 でない名前のファイルを作れない（macOS の APFS など）")
+        result = helpers.run_script("normalize_observations", ["--workspace", ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        files = [r["answer_file"] for r in common.read_csv(os.path.join(ws, "observations.csv"))[1]]
+        self.assertIn("answers/2026-10-01/chatgpt/P001-\\udcff.md", files)
 
 
 if __name__ == "__main__":

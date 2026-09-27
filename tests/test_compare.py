@@ -414,6 +414,72 @@ class ExactBoundaryTest(unittest.TestCase):
         self.assertEqual(compare._fmt_diff(0.0005), "+0.001")  # 四捨五入（銀行丸めではない）
 
 
+class PValueFormatTest(unittest.TestCase):
+    """
+    p を α と並べて読めるように示す。小数第3位に丸めると α と同じに見えるのに厳密には違う p は、違いが見える
+    まで桁を増やす（_fmt_against と同じ考え方）。p < α でシグナルになった行に「p 0.050」と出さない。
+    """
+
+    def test_p_close_to_alpha_gets_more_digits(self):
+        self.assertEqual(compare._fmt_p(compare._sign_test_exact(42, 25), 0.05), "0.0498")  # 0.049800…
+        self.assertEqual(compare._fmt_p(compare._sign_test_exact(22, 10), 0.05), "0.0501")  # 0.050102…
+        self.assertEqual(compare._fmt_p(compare._sign_test_exact(31, 13), 0.01), "0.0096")  # 0.009560…
+        # 0.04996 は小数第4位でも 0.0500 に見えるので、第5位まで出す
+        self.assertEqual(compare._fmt_p(Fraction(4996, 100000), 0.05), "0.04996")
+
+    def test_p_far_from_alpha_keeps_three_places(self):
+        self.assertEqual(compare._fmt_p(Fraction(1, 32), 0.05), "0.031")
+        self.assertEqual(compare._fmt_p(Fraction(1), 0.05), "1.000")
+        self.assertEqual(compare._fmt_p(Fraction(1, 32)), "0.031")  # α を渡さなければ小数第3位
+        self.assertEqual(compare._fmt_p(1.0), "1.000")
+
+    def test_p_equal_to_alpha_is_shown_exactly(self):
+        # α が 1/32 のとき、p = 1/32 は α 未満ではないのでシグナルにならない。「0.031」と出すと α 0.03125 より
+        # 小さく見えるので、α と同じ値に見える桁まで出す
+        self.assertEqual(compare._fmt_p(Fraction(1, 32), 0.03125), "0.03125")
+        before, after = up(6)
+        result = compare.judge(before, after, alpha=0.03125)
+        self.assertEqual(result["verdict"], "明確な変化を検出せず")
+        self.assertIn("（p=0.03125）", result["reason"])
+
+    def test_reason_uses_more_digits(self):
+        # 22 件が上がり 10 件が下がる: p = 0.050102… は α 0.05 未満ではない
+        pids = ["P{:03d}".format(i) for i in range(1, 33)]
+        before = dict((pid, (1, 3)) for pid in pids)
+        after = dict((pid, (2, 3) if i < 22 else (0, 3)) for i, pid in enumerate(pids))
+        result = compare.judge(before, after)
+        self.assertEqual((result["improved"], result["worsened"]), (22, 10))
+        self.assertEqual(result["verdict"], "明確な変化を検出せず")
+        self.assertIn("（p=0.0501）", result["reason"])
+        self.assertNotIn("p=0.050）", result["reason"])
+
+
+class SourceOrderTest(unittest.TestCase):
+    """
+    own_first_source_order は ASCII の数字だけを読む。str.isdigit は ① や ² も数字とみなすが int() は読めない
+    （ValueError で終了コード 1 になっていた）。7 桁以上は読まない（3.11 以降の int() は 4300 桁を超えると読まない）。
+    """
+
+    def test_values(self):
+        cases = (
+            ("", 0), ("1", 1), (" 3 ", 3), ("12", 12), ("999999", 999999),
+            ("①", None), ("²", None), ("１", None), ("٣", None), ("0", None), ("-1", None), ("1.0", None),
+            ("+1", None), ("一", None), ("9" * 7, None), ("9" * 5000, None),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value[:10]):
+                self.assertEqual(compare._source_order(value), expected)
+
+    def test_distribution_skips_unreadable_values(self):
+        rows = [obs_row(own_cited="1", own_first_source_order=value)
+                for value in ("1", "2", "3", "4", "", "①", "１")]
+        self.assertEqual(compare._source_order_text(rows),
+                         "1番目 1 / 2〜3番目 2 / 4番目以降 1 / 本文のリンクだけ 1 / 読めない値 2")
+        # 読めない値がなければ、その項目は出さない
+        self.assertEqual(compare._source_order_text(rows[:5]),
+                         "1番目 1 / 2〜3番目 2 / 4番目以降 1 / 本文のリンクだけ 1")
+
+
 class MetricValueTest(unittest.TestCase):
     def test_mention(self):
         self.assertEqual(compare.metric_value(obs_row(own_mentioned="1"), "mention"), 1)
@@ -568,8 +634,9 @@ class LoaderTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_csv_error_becomes_input_error(self):
-        # Python 3.9 の csv は NUL 文字を含む行で csv.Error を出す（ValueError の下位クラスではない）
-        with mock.patch.object(compare, "read_csv", side_effect=csv.Error("line contains NUL")):
+        # csv.Error は ValueError の下位クラスではないので、個別に捕まえて終了コード 2 にする
+        # （NUL は read_csv が除いてから読むので、ここでは csv.Error を直接起こす）
+        with mock.patch.object(compare, "read_csv", side_effect=csv.Error("field larger than field limit")):
             with self.assertRaises(compare.InputError) as ctx:
                 compare.load_observations(self.path)
             self.assertIn("CSV として読めません", str(ctx.exception))
@@ -620,6 +687,35 @@ class MainTest(unittest.TestCase):
                               "url": "https://{}/kakuu".format(host), "host": host, "entity_id": "",
                               "entity_kind": "other"})
         common.write_csv(os.path.join(self.ws, "citations.csv"), CIT_FIELDS, citations)
+
+    def test_output_same_as_input_exit_2(self):
+        # -o や --details-csv に入力のファイルを指定すると、入力（作り直せない実験の記録を含む）を上書きしてしまう
+        obs = os.path.join(self.ws, "observations.csv")
+        with open(obs, "rb") as f:
+            before = f.read()
+        for target in (obs, os.path.join(self.ws, "citations.csv"), os.path.join(self.ws, "observations.run.json")):
+            proc = helpers.run_script("compare_runs", ["--workspace", self.ws, "--period", "2026-10-01",
+                                                       "-o", target], cwd=self.tmp)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertIn("入力", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+        with open(obs, "rb") as f:
+            self.assertEqual(f.read(), before)
+        exp = self.write_experiment()
+        with open(exp, "rb") as f:
+            exp_before = f.read()
+        for flag in ("-o", "--details-csv"):
+            proc = helpers.run_script("compare_runs", ["--workspace", self.ws, "--experiment", exp, flag, exp],
+                                      cwd=self.tmp)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertIn("入力", proc.stderr)
+        with open(exp, "rb") as f:
+            self.assertEqual(f.read(), exp_before)
+        # 相対パスで同じファイルを指しても止める
+        rel = os.path.relpath(obs, self.tmp)
+        proc = helpers.run_script("compare_runs", ["--workspace", self.ws, "--period", "2026-10-01", "-o", rel],
+                                  cwd=self.tmp)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
 
     def write_experiment(self, _encoding="utf-8", _newline="\n", **overrides):
         values = {
@@ -1023,18 +1119,47 @@ class MainTest(unittest.TestCase):
 
     # --- 壊れた入力と出力先 ---
 
-    def test_nul_in_citations_does_not_crash(self):
-        path = os.path.join(self.ws, "citations.csv")
+    def insert_nul(self, name, replacements):
+        """<workspace>/name のバイト列の中で、(元, 置き換え) の最初の出現を置き換える（NUL を入れる）。"""
+        path = os.path.join(self.ws, name)
         with open(path, "rb") as f:
             data = f.read()
-        middle = len(data) // 2
+        for old, new in replacements:
+            self.assertIn(old, data)
+            data = data.replace(old, new, 1)
         with open(path, "wb") as f:
-            f.write(data[:middle] + b"\x00" + data[middle:])
+            f.write(data)
+
+    def test_nul_in_citations_is_removed(self):
+        # NUL は read_csv が除いてから読む。Python 3.9（csv が NUL を読めない）でも 3.11 以降（NUL ごと読む）でも、
+        # NUL がないときと同じ報告を終了コード 0 で出す。3.13 で NUL ごと読むと P002 の answer_file が回答と
+        # 結び付かず、review.example が 2/36 から 1/36 に黙って下がっていた
+        base = self.assert_ok(self.run_compare("--period", "2026-10-01"))
+        self.insert_nul("citations.csv", [(b"chatgpt/P002-1.md", b"chatgpt/P0\x0002-1.md"),
+                                          (b",review.example,", b",review.exa\x00mple,")])
         result = self.run_compare("--period", "2026-10-01")
-        self.assertIn(result.returncode, (0, 2), result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        if result.returncode == 2:  # Python 3.9 の csv は NUL を読めない
-            self.assertIn("CSV として読めません", result.stderr)
+        self.assertIn("NUL", result.stderr)
+        self.assertIn("| review.example | 2/36（5.6%） |", result.stdout)
+        self.assertEqual(result.stdout, base)
+
+    def test_nul_in_observations_is_removed(self):
+        # observations.csv の NUL も同じ。組の値・プロンプトの ID・行末に入った NUL を除き、集計も比較も
+        # NUL がないときと同じ報告を終了コード 0 で出す（3.9 では csv.Error で終了コード 2 になっていた）
+        exp = self.write_experiment()
+        base_period = self.assert_ok(self.run_compare("--period", "2026-10-01"))
+        base_compare = self.assert_ok(self.run_compare("--experiment", exp))
+        self.insert_nul("observations.csv", [(b",P002,", b",P0\x0002,"), (b",chatgpt,", b",chat\x00gpt,"),
+                                             (b"\r\n2026-10-29,", b"\x00\r\n2026-10-29,")])
+        for args, base in ((("--period", "2026-10-01"), base_period), (("--experiment", exp), base_compare)):
+            result = self.run_compare(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("NUL", result.stderr)
+            self.assertEqual(result.stdout, base)
+        self.assertIn("12/37（32.4%）", base_period)
+        self.assertIn("確認的な判定（chatgpt / web / なし / 検索あり / JP / ja、自社の引用）: 改善シグナル", base_compare)
 
     def test_output_to_existing_folder_is_error(self):
         result = self.run_compare("--period", "2026-10-01", "-o", self.tmp)
@@ -1236,6 +1361,150 @@ class MainTest(unittest.TestCase):
                       "変更後の期間にこの組の有効な回答がない", out)
         self.assertNotIn("書き誤り", out)
         self.assertIn("確認的な判定: 判定不能（変更後の期間にこの組の有効な回答がない）", result.stderr)
+
+    # --- 表記だけが違う組（region の JP と jp など） ---
+
+    SPLIT_TARGETS = ", ".join("P{:03d}".format(i) for i in range(1, 13))
+
+    def rows_split_by_region(self):
+        """
+        chatgpt の組が region の表記で2つに割れている。JP の P001〜P006 は引用が 0/3 → 2/3（上がる）、
+        jp の P007〜P012 は 2/3 → 0/3（下がる）。
+        """
+        rows = []
+        dates_b, dates_a = ("2026-10-01", "2026-10-02"), ("2026-10-29", "2026-10-30")
+        for i in range(12):
+            pid = "P{:03d}".format(i + 1)
+            group = dict(CHATGPT, region="JP" if i < 6 else "jp")
+            b, a = (0, 2) if i < 6 else (2, 0)
+            rows += make_rows("2026-10-01", dates_b, pid, cited=b, mentioned=0, group=group)
+            rows += make_rows("2026-10-29", dates_a, pid, cited=a, mentioned=0, group=group)
+        return rows
+
+    @staticmethod
+    def subsection(text, heading):
+        """「### heading」の節（次の ### か ## の見出しの前まで）。"""
+        parts = text.split(heading + "\n", 1)
+        if len(parts) < 2:
+            return ""
+        return re.split(r"\n##", parts[1], maxsplit=1)[0]
+
+    def test_primary_group_prefers_exact_notation(self):
+        # 表記が完全に一致する組（jp）を確認的な判定に使う。sorted 順で先に来る JP の組を黙って使わない
+        self.write_workspace(self.rows_split_by_region())
+        exp = self.write_experiment(primary_group="chatgpt/web/なし/検索あり/jp/ja", target_prompts=self.SPLIT_TARGETS,
+                                    control_prompts="")
+        result = self.run_compare("--experiment", exp)
+        out = self.assert_ok(result)
+        self.assertIn("確認的な判定（chatgpt / web / なし / 検索あり / jp / ja、自社の引用）: 悪化シグナル", out)
+        self.assertIn("悪化シグナル（確認的）", self.subsection(out, "### chatgpt / web / なし / 検索あり / jp / ja"))
+        upper = self.subsection(out, "### chatgpt / web / なし / 検索あり / JP / ja")
+        self.assertIn("改善シグナル（探索的）", upper)
+        self.assertNotIn("（確認的）", upper)
+        self.assertIn("確認的な判定: 悪化シグナル", result.stderr)
+        # 組が表記で割れていることは警告する
+        self.assertRegex(section(out, "## 警告"),
+                         r"だけが違う[^\n]*chatgpt / web / なし / 検索あり / JP / ja[^\n]*"
+                         r"chatgpt / web / なし / 検索あり / jp / ja")
+
+    def test_primary_group_split_by_notation_is_undecidable(self):
+        # 正規化してはじめて一致する組が2つ（JP と jp）あれば、どちらも選ばずに判定不能にする
+        self.write_workspace(self.rows_split_by_region())
+        for primary in ("chatgpt/web/なし/検索あり/Jp/ja", "chatgpt/web/なし/検索あり/ＪＰ/ja"):
+            with self.subTest(primary=primary):
+                exp = self.write_experiment(primary_group=primary, target_prompts=self.SPLIT_TARGETS,
+                                            control_prompts="")
+                result = self.run_compare("--experiment", exp)
+                out = self.assert_ok(result)
+                conclusion = section(out, "## 結論")
+                self.assertIn("確認的な判定（{}、自社の引用）: 判定不能".format(primary.replace("/", " / ")),
+                              conclusion)
+                self.assertIn("表記ゆれ", conclusion)
+                self.assertNotIn("書き誤り", conclusion)
+                self.assertNotIn("（確認的）", out)
+                warnings = section(out, "## 警告")
+                self.assertRegex(warnings, r"primary_group（{}）[^\n]*chatgpt/web/なし/検索あり/JP/ja、"
+                                           r"chatgpt/web/なし/検索あり/jp/ja".format(re.escape(primary)))
+                self.assertIn("確認的な判定: 判定不能（primary_group の組が表記ゆれで割れている）", result.stderr)
+                # どちらの組の判定も探索的として内訳に数える
+                self.assertIn("- 探索的な判定の内訳（組×指標）: 改善シグナル 1、悪化シグナル 1、", out)
+
+    def test_primary_group_in_other_notation_matches_single_group(self):
+        # 正規化して一致する組が1つだけなら、その組を使う（大文字・小文字の違いは書き誤りとみなさない）
+        exp = self.write_experiment(primary_group="ChatGPT/web/なし/検索あり/jp/JA")
+        out = self.assert_ok(self.run_compare("--experiment", exp))
+        self.assertIn("確認的な判定（ChatGPT / web / なし / 検索あり / jp / JA、自社の引用）: 改善シグナル", out)
+        self.assertNotIn("だけが違う", section(out, "## 警告"))
+
+    def test_groups_split_by_notation_are_warned(self):
+        self.write_workspace(self.rows_split_by_region())
+        for args in (("--period", "2026-10-01"), ("--before", "2026-10-01", "--after", "2026-10-29")):
+            with self.subTest(args=args):
+                result = self.run_compare(*args)
+                out = self.assert_ok(result)
+                warnings = [line for line in section(out, "## 警告").splitlines() if "だけが違う" in line]
+                self.assertEqual(len(warnings), 1, warnings)
+                self.assertIn("chatgpt / web / なし / 検索あり / JP / ja、chatgpt / web / なし / 検索あり / jp / ja",
+                              warnings[0])
+                self.assertIn("だけが違う", result.stderr)
+
+    def test_no_notation_warning_for_distinct_groups(self):
+        # chatgpt と gemini、mode が空の未記入のひな形の組は、表記だけの違いではない
+        self.write_workspace(self.rows_with_blank_template())
+        for args in (("--period", "2026-10-01"), ("--before", "2026-10-01", "--after", "2026-10-29")):
+            with self.subTest(args=args):
+                out = self.assert_ok(self.run_compare(*args))
+                self.assertNotIn("だけが違う", out)
+
+    def test_split_only_in_rows_without_valid_answers_is_not_warned(self):
+        # 表記の違う組が、有効な回答も AI の回答なしもない回答（未記入のひな形）だけなら、集計は割れていない
+        rows = standard_rows()
+        rows.append(obs_row(round="2026-10-01", prompt_id="P001", repeat="5", observed_at="2026-10-01 ",
+                            status="未記入", sources_status="不明", valid_mention="0", valid_citation="0",
+                            exclusion_reason="status が 未記入", **dict(CHATGPT, region="jp")))
+        self.write_workspace(rows)
+        self.assertNotIn("だけが違う", self.assert_ok(self.run_compare("--period", "2026-10-01")))
+
+    # --- p の表示（α の境目） ---
+
+    def test_p_near_alpha_in_table(self):
+        # 42 件が上がり 25 件が下がる: p = 0.049800… < 0.05 で改善シグナル。表の p を「0.050」と出さない
+        rows = []
+        dates_b, dates_a = ("2026-10-01", "2026-10-02"), ("2026-10-29", "2026-10-30")
+        for i in range(67):
+            pid = "P{:03d}".format(i + 1)
+            rows += make_rows("2026-10-01", dates_b, pid, cited=1, mentioned=0)
+            rows += make_rows("2026-10-29", dates_a, pid, cited=2 if i < 42 else 0, mentioned=0)
+        self.write_workspace(rows)
+        out = self.assert_ok(self.run_compare("--before", "2026-10-01", "--after", "2026-10-29",
+                                              "--metric", "citation"))
+        line = [row for row in out.splitlines() if row.startswith("| 自社の引用 |")][0]
+        self.assertIn("| 42 | 25 | 0 |", line)
+        self.assertIn("| 67 | 0.0498 |", line)
+        self.assertIn("改善シグナル（探索的）", line)
+
+    # --- own_first_source_order の読めない値 ---
+
+    def test_unreadable_source_order_is_not_an_unexpected_error(self):
+        # 手で直した observations.csv の ①・²・全角の１・桁の多すぎる数字は、終了コード 1 と traceback に
+        # せず、出典の並び順の分布から外して警告する
+        rows = standard_rows()
+        odd = {("P009", "1"): "①", ("P009", "2"): "²", ("P009", "3"): "１", ("P101", "1"): "9" * 5000}
+        for row in rows:
+            key = (row["prompt_id"], row["repeat"])
+            if row["round"] == "2026-10-01" and row["service"] == "chatgpt" and key in odd:
+                row["own_first_source_order"] = odd[key]
+        self.write_workspace(rows)
+        result = self.run_compare("--period", "2026-10-01")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        out = result.stdout
+        self.assertIn("1番目 4 / 2〜3番目 0 / 4番目以降 0 / 本文のリンクだけ 0 / 読めない値 4", out)
+        warnings = section(out, "## 警告")
+        self.assertRegex(warnings, r"chatgpt / web / なし / 検索あり / JP / ja: own_first_source_order が読めない"
+                                   r"[^\n]* 4 件")
+        self.assertNotIn("9" * 100, warnings)  # 長い値はそのまま出さない
+        self.assertIn("own_first_source_order", result.stderr)
 
 
 if __name__ == "__main__":

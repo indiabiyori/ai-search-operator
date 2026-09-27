@@ -38,7 +38,8 @@ normalize_observations.py が作った observations.csv を読み、次のどち
      ほかの組・指標はすべて探索的と明記する。実験の記録なしの比較はすべて探索的。
   率の差・差の平均・対照で調整した差は分数（fractions.Fraction）で厳密に計算し、min_effect との比較と
   符号の判定も厳密に行う（調整した差がちょうど 0 なら判定不能、差の平均がちょうど min_effect なら届いた）。
-  表示では小数第3位で四捨五入し、丸めると同じに見える値は桁を増やして示す。
+  表示では小数第3位で四捨五入し、丸めると同じに見える値は桁を増やして示す。p も同じで、丸めると α と
+  同じに見えるのに厳密には違う p（α 0.05 に対する 0.0498 など）は、α との違いが見えるまで桁を増やす。
 
 確認的な判定を出さない場合（事前に決めた条件を、結果を見てから変えられないようにする）:
   - 実験の記録に primary_group か primary_metric がない
@@ -55,6 +56,12 @@ normalize_observations.py が作った observations.csv を読み、次のどち
   どちらの期間にも有効な回答がない組なら「この組の有効な回答が、指定したラウンドにない」。
   観測したどの組とも一致しなければ、書き誤りの可能性として、観測した組の一覧を警告に出す。
   標準エラーの要約も同じ理由で示す。
+
+primary_group と組の表記:
+  組は observations.csv に書いたとおりの値で分ける（region の JP と jp は別の組）。primary_group は、表記が
+  完全に一致する組があればその組に当てる。なければ、表記（NFKC、大文字・小文字など）の違いを除いて一致する組に
+  当てるが、そうした組が2つ以上あれば（JP と jp の両方に有効な回答がある）、どちらも選ばずに確認的な判定を
+  「判定不能」とし、該当する組の一覧を警告に出す。集計と比較のどちらでも、表記だけが違う別々の組があれば警告する。
 
 primary_group の書き方:
   service/surface/login/mode/region/language を / で区切る（例: chatgpt/web/なし/検索あり・Think/JP/ja）。
@@ -94,6 +101,12 @@ observed_at の日付:
   報告（Markdown）は -o のファイルか標準出力に、どちらも UTF-8 で書く。標準出力の文字コードが cp932
   （Windows でパイプやファイルにつないだとき）でも UTF-8 のバイト列を書くので、cp932 にない文字で落ちない。
   -o と --details-csv の出力先は、読み込みの前に確かめる（既存のフォルダ、親がファイル → 終了コード 2）。
+
+壊れた入力:
+  CSV の NUL 文字は、共通処理の read_csv が除いてから読み、標準エラーに警告を出す（Python 3.9 の csv は NUL を
+  含む行を読めず、3.11 以降は NUL ごと読むので、版によって結果が変わらないようにする）。
+  own_first_source_order の読めない値（①、全角の数字など）は、出典の並び順の分布に入れず「読めない値」に数え、
+  警告を出す。
 
 終了コード: 0 は成功、2 は入力や引数の誤り（読めない CSV を含む）、1 は想定外のエラー。
 要約と警告は標準エラー出力に出す。
@@ -169,6 +182,8 @@ _ID_SEPARATOR_HINT_CHARS = "、，､・；;"
 _REASON_ONE_SIDE = "片方の期間にしかない"
 _REASON_N_DIFFER = "前後で有効な回答の数が違う"
 _REASON_NOT_OBSERVED = "この組で観測がない"
+# own_first_source_order として読む値（ASCII の数字だけ、6 桁まで）
+_SOURCE_ORDER_RE = re.compile(r"[0-9]{1,6}")
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +302,9 @@ def judge(before, after, alpha=DEFAULT_ALPHA, min_repeats=DEFAULT_MIN_REPEATS, m
     # type: (dict, dict, float, int, object) -> dict
     """
     プロンプトごとの (k, n) の前後から判定する。返り値のキー: verdict, reason, improved, worsened, tied,
-    m, p（float）, mean_diff, median_diff, eligible, excluded（(prompt_id, 理由) の一覧）, diffs。
-    diffs・mean_diff・median_diff は Fraction（厳密な値）。min_effect との比較と符号の判定も厳密に行う。
+    m, p（float）, p_exact（Fraction）, mean_diff, median_diff, eligible, excluded（(prompt_id, 理由) の一覧）,
+    diffs。diffs・mean_diff・median_diff は Fraction（厳密な値）。min_effect との比較と符号の判定も厳密に行う。
+    理由の文の p は、α と並べて判定と食い違って見えないよう _fmt_p(p, alpha) で示す。
     """
     eligible, excluded, diffs = [], [], {}
     for pid in sorted(set(before) | set(after)):
@@ -320,9 +336,9 @@ def judge(before, after, alpha=DEFAULT_ALPHA, min_repeats=DEFAULT_MIN_REPEATS, m
             reason = "差の平均 {} が最小効果 {} に届かない".format(*_fmt_against(mean_diff, min_effect))
     else:
         verdict = "明確な変化を検出せず"
-        reason = "方向がそろっていない（p={}）。変化がないという意味ではない".format(_fmt_p(p_exact))
+        reason = "方向がそろっていない（p={}）。変化がないという意味ではない".format(_fmt_p(p_exact, alpha))
     return {"verdict": verdict, "reason": reason, "improved": improved, "worsened": worsened, "tied": tied,
-            "m": m, "p": float(p_exact), "mean_diff": mean_diff, "median_diff": median_diff,
+            "m": m, "p": float(p_exact), "p_exact": p_exact, "mean_diff": mean_diff, "median_diff": median_diff,
             "eligible": eligible, "excluded": excluded, "diffs": diffs}
 
 
@@ -488,8 +504,8 @@ def parse_experiment(path):
 def _read_csv_checked(path):
     # type: (str) -> tuple
     """
-    read_csv で読み、読めないときは InputError（終了コード 2）にする。Python 3.9 の csv は、NUL 文字を
-    含む行（壊れたファイルや、BOM のない UTF-16 のファイル）で csv.Error を出す。csv.Error は
+    read_csv で読み、読めないときは InputError（終了コード 2）にする。NUL 文字は read_csv が除いてから読む
+    （どの版でも読める）。それでも csv モジュールが読めない行では csv.Error になる。csv.Error は
     ValueError の下位クラスではないので、ここで個別に捕まえる。
     """
     try:
@@ -560,6 +576,8 @@ def load_citations(path):
 # ---------------------------------------------------------------------------
 
 _MAX_PLACES = 6
+# p 値は α との大小で判定が決まるので、α と見分けがつくまで差の表示（_MAX_PLACES）より多く桁を増やせる
+_MAX_P_PLACES = 12
 
 
 def _round_half_up(value, places):
@@ -590,9 +608,27 @@ def _fmt_diff(value, places=None):
     return "{:+.{p}f}".format(_round_half_up(value, places), p=places)
 
 
-def _fmt_p(value):
-    # type: (object) -> str
-    return "{:.3f}".format(_round_half_up(value, 3))
+def _fmt_p(value, alpha=None):
+    # type: (object, object) -> str
+    """
+    p 値の表示（既定は小数第3位）。alpha を渡すと、α と並べて読んでも判定と食い違わないよう桁を増やす
+    （_fmt_against と同じ考え方）。丸めると α と同じに見えるのに厳密には違うとき（0.0498 と 0.05）は、違いが
+    見えるまで増やす。α とちょうど同じ値（α が 1/32 のときの p = 1/32）は、α と同じ値に見える桁まで増やす
+    （「0.031」と出すと α 0.03125 より小さく見えるが、p < α ではないのでシグナルにならない）。
+    """
+    exact = _exact(value)
+    places = 3
+    if alpha is not None:
+        limit = _exact(alpha)
+        while places < _MAX_P_PLACES:
+            shown = _round_half_up(exact, places)
+            if exact == limit:
+                if shown == exact:
+                    break
+            elif shown != _round_half_up(limit, places):
+                break
+            places += 1
+    return "{:.{p}f}".format(_round_half_up(exact, places), p=places)
 
 
 def _fmt_plain(value, places=None):
@@ -761,6 +797,29 @@ def _check_output_path(path, flag):
         raise InputError("{} の出力先のフォルダを作れません（{} はファイルです）: {}".format(flag, parent, path))
 
 
+def _same_file(a, b):
+    # type: (str, str) -> bool
+    """a と b が同じファイルを指すか。両方あれば samefile（シンボリックリンクと相対パスも同じとみなす）で比べる。"""
+    try:
+        if os.path.exists(a) and os.path.exists(b):
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _check_output_not_input(outputs, inputs):
+    # type: (list, list) -> None
+    """出力先が入力のファイル（observations.csv、実験の記録など）と同じなら、上書きする前に InputError にする。"""
+    for path, flag in outputs:
+        if not path:
+            continue
+        for source in inputs:
+            if source and _same_file(path, source):
+                raise InputError("{} に入力のファイルが指定されています（上書きすると元に戻せません）: {}".format(
+                    flag, path))
+
+
 def _write_file(path, flag, writer):
     # type: (str, str, object) -> None
     """フォルダを作ってから writer(path) で書く。書けなければ InputError。"""
@@ -841,22 +900,52 @@ def _exclusion_text(rows):
     return "、".join("{} {} 件".format(reason, n) for reason, n in items)
 
 
+def _source_order(value):
+    # type: (object) -> object
+    """
+    own_first_source_order の値を読む。空なら 0（出典の欄になく、本文のリンクだけ）、ASCII の数字だけで 1 以上
+    6 桁以下なら その整数、それ以外は None（読めない値）。normalize_observations.py は 1 以上の整数か空を書くので、
+    読めない値は observations.csv を手で直したときにだけ入る。str.isdigit は ① や ² も数字とみなすが int() は
+    読めず（ValueError で終了コード 1 になっていた）、全角の数字やアラビア文字の数字は int() が読んでしまうので、
+    ASCII の数字だけを受け付ける。7 桁以上も読まない（3.11 以降の int() は 4300 桁を超えると読まない）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    if not _SOURCE_ORDER_RE.fullmatch(text) or int(text) < 1:
+        return None
+    return int(text)
+
+
+def _unreadable_source_orders(rows):
+    # type: (list) -> list
+    """自社が引用された有効な回答のうち、own_first_source_order が読めない値のもの（値の一覧）。"""
+    return [row.get("own_first_source_order", "") for row in rows
+            if metric_value(row, "citation") == 1 and _source_order(row.get("own_first_source_order")) is None]
+
+
 def _source_order_text(rows):
     # type: (list) -> str
-    first = middle = later = body_only = 0
+    """出典の並び順の分布。読めない値は分布に入れず、あれば「読めない値」の件数を足す（警告は period_warnings）。"""
+    first = middle = later = body_only = unreadable = 0
     for row in rows:
         if metric_value(row, "citation") != 1:
             continue
-        order = (row.get("own_first_source_order") or "").strip()
-        if not order.isdigit():
+        order = _source_order(row.get("own_first_source_order"))
+        if order is None:
+            unreadable += 1
+        elif order == 0:
             body_only += 1
-        elif int(order) == 1:
+        elif order == 1:
             first += 1
-        elif int(order) <= 3:
+        elif order <= 3:
             middle += 1
         else:
             later += 1
-    return "1番目 {} / 2〜3番目 {} / 4番目以降 {} / 本文のリンクだけ {}".format(first, middle, later, body_only)
+    text = "1番目 {} / 2〜3番目 {} / 4番目以降 {} / 本文のリンクだけ {}".format(first, middle, later, body_only)
+    if unreadable:
+        text += " / 読めない値 {}".format(unreadable)
+    return text
 
 
 def _competitor_lines(rows, competitors):
@@ -1000,10 +1089,26 @@ def _empty_groups_section(empty_groups, counts=None):
     return lines
 
 
+def _examples(values, limit=3, width=10):
+    # type: (list, int, int) -> str
+    """値の例（重複を除いて先頭の limit 個。長い値は width 文字で切る）。"""
+    shown = []
+    for value in values:
+        text = value if len(value) <= width else value[:width] + "…"
+        if text not in shown:
+            shown.append(text)
+    return "、".join(shown[:limit]) + (" など" if len(shown) > limit else "")
+
+
 def period_warnings(rows, group_by):
     # type: (list, tuple) -> list
-    warnings = []
+    warnings = split_group_warnings(rows, group_by)
     for key, g_rows in sorted(_group_rows(rows, group_by).items()):
+        unreadable = _unreadable_source_orders(g_rows)
+        if unreadable:
+            warnings.append("{}: own_first_source_order が読めない値の回答が {} 件（例: {}）。出典の並び順の分布には"
+                            "入れず「読めない値」に数えた。値は 1 以上の半角の数字か空にする（normalize_observations.py "
+                            "で作り直せば元に戻る）".format(group_label(key), len(unreadable), _examples(unreadable)))
         dates = _dates(g_rows)
         if len(dates) == 1:
             warnings.append("{}: 期間の回答がすべて同じ日（{}）のもの。日による変動を見分けられない".format(
@@ -1156,11 +1261,56 @@ def detail_rows(results):
     return out
 
 
+def _loose_key(key):
+    # type: (tuple) -> tuple
+    """組の値を照合用にそろえる（NFKC、大文字・小文字、ダッシュ類、空白。normalize_text と前後の空白）。"""
+    return tuple(normalize_text(value).strip() for value in key)
+
+
 def _same_group(key, primary):
     # type: (tuple, tuple) -> bool
-    if len(key) != len(primary):
-        return False
-    return all(normalize_text(a).strip() == normalize_text(b).strip() for a, b in zip(key, primary))
+    """表記（大文字・小文字、全角・半角など）の違いを除けば同じ組か。"""
+    return len(key) == len(primary) and _loose_key(key) == _loose_key(primary)
+
+
+def split_group_warnings(rows, group_by):
+    # type: (list, tuple) -> list
+    """
+    表記（大文字・小文字、全角・半角など）だけが違うために別々に集計されている組の警告。組は書いたとおりの値で
+    分ける（region の JP・jp・ＪＰ は別の組）ので、同じ条件の観測が気づかないまま割れる。そろえ方は _same_group と
+    同じ（normalize_text）で、空白の有無の違い（「検索あり」と「検索 あり」）はそろえない（mode の揺れは
+    normalize_observations.py が警告する）。有効な回答か AI の回答なしがある組だけを見る（未記入のひな形だけの組は
+    観測を表さない）。
+    """
+    by_loose = {}
+    for key in set(group_key(r, group_by) for r in rows if _is_observed(r)):
+        by_loose.setdefault(_loose_key(key), []).append(key)
+    warnings = []
+    for _loose, keys in sorted(by_loose.items()):
+        if len(keys) > 1:
+            warnings.append("表記（大文字・小文字、全角・半角など）だけが違う組が {} つに分かれている: {}。組は書いたとおりの"
+                            "値で分け、合算しない。回答ファイルの表記をそろえて normalize_observations.py を実行し直す".format(
+                                len(keys), "、".join(group_label(key) for key in sorted(keys))))
+    return warnings
+
+
+def _pick_primary_group(primary, keys, empty_groups):
+    # type: (tuple, set, dict) -> tuple
+    """
+    primary_group に当たる組を選ぶ。(選んだ組か None, 表記ゆれで割れた組の一覧)。
+    表記が完全に一致する組があればそれを選ぶ。なければ、表記の違いを除いて一致する組のうち、有効な回答か AI の
+    回答なしがある組（empty_groups にない組）が1つならそれを、2つ以上なら選ばずに一覧を返す（どれを確認的な
+    判定に使うか決められない）。有効な回答がない組しか一致しなければ、その組を選ぶ（理由の表示に使う）。
+    """
+    if primary in keys:
+        return primary, []
+    loose = sorted(key for key in keys if _same_group(key, primary))
+    observed = [key for key in loose if key not in empty_groups]
+    if len(observed) > 1:
+        return None, observed
+    if observed:
+        return observed[0], []
+    return (loose[0] if loose else None), []
 
 
 def compare_warnings(before_rows, after_rows, results, group_by, experiment, run_info, before_rounds,
@@ -1169,8 +1319,9 @@ def compare_warnings(before_rows, after_rows, results, group_by, experiment, run
     """
     仕様 7.4 の「報告に必ず添える警告」。組の有無・観測した日・モードの違いは、有効な回答（valid_mention が 1）
     だけで確かめる。未記入のひな形（mode が空）や記録の失敗は観測を表さないので、誤った警告のもとになる。
+    表記だけが違う組の警告（split_group_warnings）は、両方の期間の回答を合わせて確かめる。
     """
-    warnings = []
+    warnings = split_group_warnings(before_rows + after_rows, group_by)
     before_valid = [r for r in before_rows if _is_valid(r)]
     after_valid = [r for r in after_rows if _is_valid(r)]
     b_groups = _group_rows(before_valid, group_by)
@@ -1266,8 +1417,9 @@ def _experiment_warnings(before_rows, after_rows, experiment, run_info, before_r
     return warnings
 
 
-def _results_table(group_results, confirm):
-    # type: (list, object) -> list
+def _results_table(group_results, confirm, alpha):
+    # type: (list, object, float) -> list
+    """判定の表。p は α と並べて読めるよう _fmt_p(p, alpha) で示す（境目では桁を増やす）。"""
     lines = [
         "| 指標 | 前 | 後 | 比較した | 外した | 上がった | 下がった | 同じ | 差の平均 | 差の中央値 | m | p "
         "| 対照の差の平均 | 調整した差 | 判定 | 理由 |",
@@ -1280,7 +1432,8 @@ def _results_table(group_results, confirm):
             METRIC_LABELS[res["metric"]], format_rate(*res["before_count"]), format_rate(*res["after_count"]),
             len(target["eligible"]), len(target["excluded"]), target["improved"], target["worsened"],
             target["tied"], _fmt_diff(target["mean_diff"]), _fmt_diff(target["median_diff"]), target["m"],
-            _fmt_p(target["p"]), _fmt_diff(final["control_mean_diff"]), _fmt_diff(final["adjusted_diff"]),
+            _fmt_p(target["p_exact"], alpha), _fmt_diff(final["control_mean_diff"]),
+            _fmt_diff(final["adjusted_diff"]),
             final["verdict"] + tag, final["reason"] or "-"))))
     return lines
 
@@ -1367,7 +1520,7 @@ def render_compare(results, ctx, warnings):
         group_results = by_group[key]
         lines += ["", "### " + group_label(key), ""]
         judged_here = [r for r in group_results if r["metric"] is not None]
-        lines += _results_table(judged_here, confirm)
+        lines += _results_table(judged_here, confirm, ctx["alpha"])
         other = [r for r in group_results if r["metric"] is None][0]
         lines += [
             "",
@@ -1497,19 +1650,24 @@ def run_compare(args, rows, run_info, group_by, warnings):
     after_rows = [r for r in rows if r.get("round") in after_set]
     results = compare_groups(before_rows, after_rows, targets, controls, metrics, group_by, alpha,
                              min_repeats, min_effect)
-    confirm = None
+    empty_groups, empty_counts = empty_compare_groups(before_rows, after_rows, group_by)
+    one_sided = one_sided_compare_groups(before_rows, after_rows, group_by)
+    confirm = chosen = None
+    split = []
     if confirm_label:
+        # 組は書いたとおりの値で分けるので、表記だけが違う組（JP と jp）が primary_group に同時に一致しうる。
+        # 表記が完全に一致する組を優先し、表記の違いを除いてはじめて一致する組が2つ以上なら選ばない
+        keys = set(r["key"] for r in results) | set(one_sided) | set(empty_groups)
+        chosen, split = _pick_primary_group(primary_group, keys, empty_groups)
         for res in results:
-            if res["metric"] == primary_metric and _same_group(res["key"], primary_group):
+            if res["metric"] == primary_metric and res["key"] == chosen:
                 confirm = res
                 break
     warnings += compare_warnings(before_rows, after_rows, results, group_by, experiment, run_info, before, after)
-    empty_groups, empty_counts = empty_compare_groups(before_rows, after_rows, group_by)
-    one_sided = one_sided_compare_groups(before_rows, after_rows, group_by)
     confirm_missing = confirm_short = ""
     if confirm_label and confirm is None:
         confirm_missing, confirm_short = _confirm_missing_reason(
-            primary_group, one_sided, empty_groups, before_rows + after_rows, group_by, warnings)
+            primary_group, chosen, split, one_sided, empty_groups, before_rows + after_rows, group_by, warnings)
     # どの回答にもない ID（打ち間違い）。組ごとの「この組で観測がない」だけでは気づきにくい
     seen = set(r.get("prompt_id") for r in before_rows + after_rows)
     for ids, set_label in ((targets, "対象"), (controls, "対照")):
@@ -1538,17 +1696,25 @@ def run_compare(args, rows, run_info, group_by, warnings):
     return text, summary, results
 
 
-def _confirm_missing_reason(primary_group, one_sided, empty_groups, rows, group_by, warnings):
-    # type: (tuple, dict, dict, list, tuple, list) -> tuple
+def _confirm_missing_reason(primary_group, chosen, split, one_sided, empty_groups, rows, group_by, warnings):
+    # type: (tuple, object, list, dict, dict, list, tuple, list) -> tuple
     """
-    primary_group の組が判定の表にないときの (報告の理由, 標準エラーの要約の理由)。観測したどの組とも
-    一致しなければ、書き誤りの可能性として、観測した組の一覧を warnings に足す。
+    確認的な判定を出せないときの (報告の理由, 標準エラーの要約の理由)。chosen と split は _pick_primary_group の
+    返り値。primary_group に一致する組が表記ゆれで割れていれば、該当する組の一覧を warnings に足す。観測した
+    どの組とも一致しなければ、書き誤りの可能性として、観測した組の一覧を warnings に足す。
     """
-    for key, missing in sorted(one_sided.items()):
-        if _same_group(key, primary_group):
-            reason = _one_sided_reason(missing)
-            return reason + "（「比較できない組」を参照）", reason
-    if any(_same_group(key, primary_group) for key in empty_groups):
+    if split:
+        listed = "、".join("/".join(key) for key in split)
+        warnings.append("実験の記録の primary_group（{}）に、表記（大文字・小文字、全角・半角など）だけが違う別々の組が "
+                        "{} つ一致する: {}。組は書いたとおりの値で分けるので、どの組を確認的な判定に使うか決められない。"
+                        "回答ファイルの表記をそろえて normalize_observations.py を実行し直す".format(
+                            "/".join(primary_group), len(split), listed))
+        return ("primary_group に一致する組が表記ゆれで {} つに割れている（{}。「警告」を参照）".format(len(split), listed),
+                "primary_group の組が表記ゆれで割れている")
+    if chosen in one_sided:
+        reason = _one_sided_reason(one_sided[chosen])
+        return reason + "（「比較できない組」を参照）", reason
+    if chosen in empty_groups:
         return ("この組の有効な回答が、指定したラウンドにない（「有効な回答がない組」を参照）",
                 "この組の有効な回答がない")
     observed = sorted(set(group_key(r, group_by) for r in rows if _is_valid(r)))
@@ -1626,6 +1792,11 @@ def run(args):
         raise InputError("-o と --details-csv に同じファイルが指定されています: {}".format(args.output))
 
     obs_path = args.observations or os.path.join(args.workspace, "observations.csv")
+    obs_dir = os.path.dirname(os.path.abspath(obs_path))
+    _check_output_not_input(
+        [(args.output, "-o"), (args.details_csv, "--details-csv")],
+        [obs_path, os.path.join(obs_dir, "citations.csv"), os.path.join(obs_dir, "observations.run.json"),
+         args.experiment])
     if not args.observations and not os.path.isfile(obs_path):
         hint = workspace_hint(obs_path, "observations.csv")
         if hint:

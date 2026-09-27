@@ -361,6 +361,31 @@ class PlanRoundTest(WorkspaceCase):
                 new_round.plan_round(prompts, "2026-10-01", ["chatgpt"], 1, None, mode=mode)
             self.assertIn("--mode", str(ctx.exception))
 
+    def test_options_reject_characters_not_writable_in_utf8(self):
+        # UTF-8 でない端末から渡したバイト（$'\xff' など）は、Python の中では surrogate の文字（\udcff）になる。
+        # 回答ファイルに書けないので、ファイルを作る前に入力の誤りにする
+        prompts = self.load_prompts()
+        cases = (
+            ("--mode", dict(mode="\udcff")),
+            ("--mode", dict(mode="検索\udcffあり")),
+            ("--region", dict(region="J\udcffP")),
+            ("--language", dict(language="j\udcffa")),
+        )
+        for option, kwargs in cases:
+            with self.assertRaises(new_round.InputError, msg=repr(kwargs)) as ctx:
+                new_round.plan_round(prompts, "2026-10-01", ["chatgpt"], 1, None, **kwargs)
+            self.assertIn(option, str(ctx.exception))
+            self.assertIn("UTF-8", str(ctx.exception))
+
+    def test_prompt_with_character_not_writable_in_utf8(self):
+        # prompts.csv から読んだ文には入らない（読めないバイトは置き換える）が、plan_round を直接呼ぶときのため
+        prompts = self.load_prompts()
+        prompts["P002"]["prompt"] = "浅煎りの\udcffコーヒー豆"
+        with self.assertRaises(new_round.InputError) as ctx:
+            new_round.plan_round(prompts, "2026-10-01", ["chatgpt"], 1, None)
+        self.assertIn("P002", str(ctx.exception))
+        self.assertIn("UTF-8", str(ctx.exception))
+
 
 class WriteRoundTest(WorkspaceCase):
     """ファイルを書くときの OS のエラーを、traceback ではなく入力エラー（終了コード 2）にする。"""
@@ -432,6 +457,49 @@ class WriteRoundTest(WorkspaceCase):
         self.assertIn("1 件", str(ctx.exception))  # それまでに作った件数を知らせる
         self.assertTrue(os.path.isfile(calls[0]))
         self.assertFalse(os.path.exists(calls[1]), "書きかけのファイルを残さない")
+
+    def test_text_not_writable_in_utf8_leaves_no_file(self):
+        # plan_round を通らない値で呼ばれても、0 バイトのファイルを残さない
+        # （残すと次の実行で「既にある」とみなされ、利用者が消すまでひな形が作られない）
+        plan = new_round.plan_round(self.load_prompts(), "2026-10-01", ["chatgpt"], 1, ["P001"])
+        plan[0][1]["mode"] = "\udcff"
+        with self.assertRaises(UnicodeEncodeError):
+            new_round.write_round(self.ws, plan)
+        self.assertEqual(self.list_answers(), set())
+
+    def test_unexpected_write_error_removes_the_partial_file(self):
+        # OSError 以外で書き込みが止まっても、書きかけのファイルは消してから想定外のエラーとして伝える
+        real_open = open
+
+        class BrokenFile(object):
+            def __init__(self, f):
+                self.f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.f.close()
+                return False
+
+            def write(self, data):
+                self.f.write(data[:5])
+                raise RuntimeError("想定外の失敗")
+
+        calls = []
+
+        def fake_open(path, mode="r", *args, **kwargs):
+            f = real_open(path, mode, *args, **kwargs)
+            if "x" in mode:
+                calls.append(path)
+                return BrokenFile(f)
+            return f
+
+        with mock.patch("builtins.open", side_effect=fake_open):
+            with self.assertRaises(RuntimeError):
+                new_round.write_round(self.ws, self.plan(services=("chatgpt",)))
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(os.path.exists(calls[0]), "書きかけのファイルを残さない")
 
 
 class MainTest(WorkspaceCase):
@@ -635,15 +703,19 @@ class MainTest(WorkspaceCase):
         self.assertIn("--round", proc.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.ws, "answers")))
 
-    def test_nul_in_prompts_csv_exit_2(self):
-        # Python 3.9 の csv は NUL で csv.Error を出し、3.13 は通す。どちらの版でも入力エラーにする
+    def test_nul_in_prompts_csv_removed_with_warning(self):
+        # 共通処理の read_csv は NUL を除いて読み、除いたことを警告する（Python 3.9 と 3.13 で同じ結果にするため）
         with open(os.path.join(self.ws, "prompts.csv"), "wb") as f:
             f.write((PROMPTS_HEADER + "P001,架空珈琲の\x00豆,購入,指名,,,yes,\n").encode("utf-8"))
         proc = helpers.run_script("new_round", ["--round", "2026-10-01", "--services", "chatgpt"], cwd=self.tmp)
-        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
-        self.assertIn("prompts.csv", proc.stderr)
-        self.assertFalse(os.path.exists(os.path.join(self.ws, "answers")))
+        self.assertIn("NUL", proc.stderr)
+        path = os.path.join(self.ws, "answers", "2026-10-01", "chatgpt", "P001-1.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("prompt: 架空珈琲の豆", text)
+        self.assertNotIn("\x00", text)
 
     def test_observed_at_guidance_mentions_date(self):
         # 1ラウンドを複数の日に分けるので、時刻だけでなく日付も直すよう案内する
@@ -669,6 +741,31 @@ class MainTest(WorkspaceCase):
         proc = helpers.run_script("new_round", self.ARGS + ["--mode", "GPT-5 Thinking/検索あり"], cwd=self.tmp)
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("--mode", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "answers")))
+
+    def test_options_not_writable_in_utf8_exit_2_without_files(self):
+        base = ["--round", "r1", "--services", "chatgpt", "--repeats", "1", "--prompts", "P001"]
+        for option, value in (("--mode", "\udcff"), ("--region", "J\udcffP"), ("--language", "j\udcffa")):
+            code, err = self.main_in_process(base + [option, value])
+            self.assertEqual(code, 2, err)
+            self.assertIn(option, err)
+            self.assertNotIn("Traceback", err)
+            self.assertEqual(self.list_answers(), set(), option)
+        # 続けて正しい値で実行すれば、ひな形が作られる（0 バイトのファイルが「既にある」として邪魔をしない）
+        code, err = self.main_in_process(base + ["--mode", "検索あり"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 件作りました", err)
+        self.assertEqual(self.read_meta("answers/r1/chatgpt/P001-1.md")["mode"], "検索あり")
+
+    @unittest.skipIf(os.name == "nt" or sys.getfilesystemencoding().lower().replace("-", "") != "utf8",
+                     "引数のバイトを UTF-8 として読む環境だけで確かめる（Windows の引数は UTF-16 で渡る）")
+    def test_non_utf8_bytes_in_arguments_exit_2(self):
+        # 端末から --mode $'\xff' を渡したのと同じ。引数のバイト \xff は、Python の中で \udcff になる
+        proc = helpers.run_script("new_round", self.ARGS + ["--mode", os.fsdecode(b"\xff")], cwd=self.tmp)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("--mode", proc.stderr)
+        self.assertIn("UTF-8", proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.ws, "answers")))
 
