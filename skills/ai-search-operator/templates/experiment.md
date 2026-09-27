@@ -10,6 +10,7 @@ primary_group:       # 確認的に判定する1組。service/surface/login/mode
 alpha: 0.05          # 符号検定の有意水準
 min_effect:          # 実務上の最小効果（プロンプトごとの率の差の平均。例 0.10）。空なら使わない
 entities_sha256:     # entities.csv を固めたとき（1回目の変更前のラウンドの前）に observations.run.json から写す
+prompts_sha256:      # prompts.csv の SHA-256。entities_sha256 と同じときに observations.run.json から写す
 target_prompts:      # 対象プロンプトの ID を , で区切る
 control_prompts:     # 対照プロンプトの ID を , で区切る。なければ空
 baseline_rounds:     # 変更前のラウンド名を , で区切る。2つ以上
@@ -20,8 +21,8 @@ verdict:             # 判定のあとで、報告の「確認的な判定」を
 
 ai-search-operator で実験を記録するためのひな形。スキルのフォルダにあるこのファイルは編集せず、作業フォルダの `ai-search/experiments/E001.md` のようにコピーして書く。書き方は `references/06-experiments.md` にある。
 
-- 先頭の欄の primary_metric、primary_group、alpha、min_effect、entities_sha256、target_prompts、control_prompts、baseline_rounds、after_rounds は、変更前のラウンドを始める前に書く。結果を見てから変えない。
-- entities_sha256 は、entities.csv を固めてから observations.run.json の値を写す。変更前のラウンドを貼り終えたら、observations.run.json の値と同じかを確かめる。
+- 先頭の欄の primary_metric、primary_group、alpha、min_effect、entities_sha256、prompts_sha256、target_prompts、control_prompts、baseline_rounds、after_rounds は、変更前のラウンドを始める前に書く。結果を見てから変えない。
+- entities_sha256 と prompts_sha256 は、entities.csv と prompts.csv を固めてから observations.run.json の値を写す。変更前のラウンドを貼り終えたら、observations.run.json の値と同じかを確かめる。どちらかが欠けているか違うと、確認的な判定は出ない。
 - 先頭の欄は compare_runs.py が読むので、空欄のままにし、`[要追加: ○○]` を書かない。本文の未記入の箇所は `[要追加: ○○]` のまま残す。
 - 先頭の欄の値に「空白 + #」を書かない。そこから後ろはコメントとして読み捨てられる。
 - 判定が明確な変化を検出せず・判定不能でも、このファイルを消さずに残す。

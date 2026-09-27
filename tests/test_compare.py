@@ -37,8 +37,15 @@ CHATGPT = {"service": "chatgpt", "surface": "web", "login": "なし", "mode": "�
 GEMINI = {"service": "gemini", "surface": "web", "login": "なし", "mode": "", "region": "JP", "language": "ja"}
 
 ENTITIES_SHA = "1a2b3c4d5e6f" + "0" * 52
+PROMPTS_SHA = "9f8e7d6c5b4a" + "1" * 52
 TARGETS = ["P001", "P002", "P003", "P004", "P005", "P006", "P007", "P008"]
 CONTROLS = ["P101", "P102", "P103"]
+
+# 実験の既定のラウンド（手順書 06: 変更前は2ラウンド以上、変更後は変更前と同じ数）と、各ラウンドで観測した日
+BEFORE_ROUNDS = (("2026-10-01", ("2026-10-01", "2026-10-02")), ("2026-10-08", ("2026-10-08", "2026-10-09")))
+AFTER_ROUNDS = (("2026-10-29", ("2026-10-29", "2026-10-30")), ("2026-11-05", ("2026-11-05", "2026-11-06")))
+# 既定のデータ（standard_rows）と実験の記録（write_experiment）で出る確認的な判定
+CONFIRMED_IMPROVED = "確認的な判定（chatgpt / web / なし / 検索あり / JP / ja、自社の引用）: 改善シグナル"
 
 EXPERIMENT_EXAMPLE = """---
 id: E001
@@ -106,24 +113,27 @@ def make_rows(round_name, dates, pid, cited, mentioned, group=None, repeats=3, *
 
 def standard_rows(after_dates=("2026-10-29", "2026-10-30"), after_mode="検索あり"):
     """
-    架空の観測データ。
+    架空の観測データ。変更前は 2026-10-01（10-01、10-02 に観測）と 2026-10-08（10-08、10-09）、変更後は
+    2026-10-29（after_dates）と 2026-11-05（11-05、11-06）の2ラウンドずつ。どのラウンドも同じパターンなので、
+    率は1ラウンドのときと同じで、1プロンプトあたりの件数は各期間 6 件になる。
     - chatgpt の組: 対象 P001〜P006 は引用が 0/3 → 2/3（上がる）、P007・P008 は 1/3 のまま。
       対照 P101〜P103 は 1/3 のまま。P009 は 3/3 → 0/3（下がる）。言及はすべて 1/3 のまま。
-    - gemini の組: P001 だけ（0/3 → 3/3）。観測はどちらの期間も1日だけ。
-    - 変更前のラウンドには、未記入・AI の回答なし・出典が不明の回答を1件ずつ混ぜる。
+    - gemini の組: P001 だけ（0/3 → 3/3）。観測は各ラウンド1日だけ（ラウンドの日）。
+    - 2026-10-01 のラウンドには、未記入・AI の回答なし・出典が不明の回答を1件ずつ混ぜる。
     """
-    before_dates = ("2026-10-01", "2026-10-02")
     after_group = dict(CHATGPT, mode=after_mode)
+    after_rounds = ((AFTER_ROUNDS[0][0], tuple(after_dates)),) + AFTER_ROUNDS[1:]
     rows = []
-    for pid in TARGETS[:6]:
-        rows += make_rows("2026-10-01", before_dates, pid, cited=0, mentioned=1)
-        rows += make_rows("2026-10-29", after_dates, pid, cited=2, mentioned=1, group=after_group)
-    for pid in TARGETS[6:] + CONTROLS:
-        rows += make_rows("2026-10-01", before_dates, pid, cited=1, mentioned=1)
-        rows += make_rows("2026-10-29", after_dates, pid, cited=1, mentioned=1, group=after_group)
-    rows += make_rows("2026-10-01", before_dates, "P009", cited=3, mentioned=1,
-                      competitors_mentioned="comp-a", competitors_cited="comp-a")
-    rows += make_rows("2026-10-29", after_dates, "P009", cited=0, mentioned=1, group=after_group)
+    for (b_round, b_dates), (a_round, a_dates) in zip(BEFORE_ROUNDS, after_rounds):
+        for pid in TARGETS[:6]:
+            rows += make_rows(b_round, b_dates, pid, cited=0, mentioned=1)
+            rows += make_rows(a_round, a_dates, pid, cited=2, mentioned=1, group=after_group)
+        for pid in TARGETS[6:] + CONTROLS:
+            rows += make_rows(b_round, b_dates, pid, cited=1, mentioned=1)
+            rows += make_rows(a_round, a_dates, pid, cited=1, mentioned=1, group=after_group)
+        rows += make_rows(b_round, b_dates, "P009", cited=3, mentioned=1,
+                          competitors_mentioned="comp-a", competitors_cited="comp-a")
+        rows += make_rows(a_round, a_dates, "P009", cited=0, mentioned=1, group=after_group)
     # 誤った説明の判定: 人が確認した 誤りあり・誤りなし と、Claude の下書きだけのもの
     for row in rows:
         if row["round"] == "2026-10-01" and row["service"] == "chatgpt":
@@ -143,8 +153,10 @@ def standard_rows(after_dates=("2026-10-29", "2026-10-30"), after_mode="検索�
     rows.append(obs_row(round="2026-10-01", prompt_id="P201", repeat="1", observed_at="2026-10-01 12:00",
                         sources_status="不明", valid_citation="0", exclusion_reason="出典が不明", **CHATGPT))
     # 別の組（gemini）
-    rows += make_rows("2026-10-01", ("2026-10-01",), "P001", cited=0, mentioned=0, group=GEMINI)
-    rows += make_rows("2026-10-29", ("2026-10-29",), "P001", cited=3, mentioned=3, group=GEMINI)
+    for b_round, _dates in BEFORE_ROUNDS:
+        rows += make_rows(b_round, (b_round,), "P001", cited=0, mentioned=0, group=GEMINI)
+    for a_round, _dates in AFTER_ROUNDS:
+        rows += make_rows(a_round, (a_round,), "P001", cited=3, mentioned=3, group=GEMINI)
     return rows
 
 
@@ -559,7 +571,17 @@ class ParseExperimentTest(unittest.TestCase):
         self.assertEqual(exp["baseline_rounds"], ["2026-10-01", "2026-10-08"])
         self.assertEqual(exp["after_rounds"], ["2026-10-29", "2026-11-12"])
         self.assertEqual(exp["entities_sha256"], "")
+        self.assertEqual(exp["prompts_sha256"], "")
         self.assertEqual(exp["changed_on"], "2026-10-15")
+
+    def test_sha_fields_are_lowercased(self):
+        # prompts_sha256 は entities_sha256 と同じく、前後の空白を除いて小文字にそろえて読む
+        text = EXPERIMENT_EXAMPLE.replace(
+            "entities_sha256:         #",
+            "entities_sha256: {}\nprompts_sha256:  {}  #".format(ENTITIES_SHA.upper(), PROMPTS_SHA.upper()))
+        exp = compare.parse_experiment(self.write(text))
+        self.assertEqual(exp["entities_sha256"], ENTITIES_SHA)
+        self.assertEqual(exp["prompts_sha256"], PROMPTS_SHA)
 
     def test_empty_min_effect_is_none(self):
         text = EXPERIMENT_EXAMPLE.replace("min_effect: 0.10 ", "min_effect: ")
@@ -664,14 +686,20 @@ class MainTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def write_run_info(self, answer_files=0, **overrides):
+        """observations.run.json を書く。overrides で値を変える（None は JSON の null）。"""
+        info = {"script": "normalize_observations.py", "version": "1.0.0",
+                "generated_at": "2026-10-30T21:00:00+09:00", "entities_sha256": ENTITIES_SHA,
+                "prompts_sha256": PROMPTS_SHA, "answer_files": answer_files, "valid_mention": 0,
+                "valid_citation": 0}
+        info.update(overrides)
+        with open(os.path.join(self.ws, "observations.run.json"), "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=2)
+
     def write_workspace(self, rows, run_info=True):
         common.write_csv(os.path.join(self.ws, "observations.csv"), OBS_FIELDS, rows)
         if run_info:
-            info = {"script": "normalize_observations.py", "version": "1.0.0",
-                    "generated_at": "2026-10-30T21:00:00+09:00", "entities_sha256": ENTITIES_SHA,
-                    "prompts_sha256": None, "answer_files": len(rows), "valid_mention": 0, "valid_citation": 0}
-            with open(os.path.join(self.ws, "observations.run.json"), "w", encoding="utf-8") as f:
-                json.dump(info, f, ensure_ascii=False, indent=2)
+            self.write_run_info(len(rows))
         common.write_csv(os.path.join(self.ws, "entities.csv"),
                          ["entity_id", "kind", "name", "terms", "exclude_terms", "domains"], [
                              {"entity_id": "own-company", "kind": "own", "name": "架空珈琲",
@@ -723,8 +751,10 @@ class MainTest(unittest.TestCase):
             "change_category": "コンテンツ", "change_summary": "/pricing/ に税込の料金表を追加",
             "changed_on": "2026-10-15", "primary_metric": "citation",
             "primary_group": "chatgpt/web/なし/検索あり/JP/ja", "alpha": "0.05", "min_effect": "0.10",
-            "entities_sha256": ENTITIES_SHA, "target_prompts": ", ".join(TARGETS),
-            "control_prompts": ", ".join(CONTROLS), "baseline_rounds": "2026-10-01", "after_rounds": "2026-10-29",
+            "entities_sha256": ENTITIES_SHA, "prompts_sha256": PROMPTS_SHA, "target_prompts": ", ".join(TARGETS),
+            "control_prompts": ", ".join(CONTROLS),
+            "baseline_rounds": ", ".join(name for name, _dates in BEFORE_ROUNDS),
+            "after_rounds": ", ".join(name for name, _dates in AFTER_ROUNDS),
             "verdict": "",
         }
         values.update(overrides)
@@ -898,6 +928,8 @@ class MainTest(unittest.TestCase):
         exp = self.write_experiment()
         out = self.assert_ok(self.run_compare("--experiment", exp))
         self.assertNotIn("changed_on", section(out, "## 警告"))
+        # 確認的な判定の前提（ラウンドと changed_on の前後）でも、無効な回答は見ない
+        self.assertIn(CONFIRMED_IMPROVED, out)
 
     def test_primary_group_without_answers(self):
         exp = self.write_experiment(primary_group="claude/web/なし/検索あり/JP/ja")
@@ -956,15 +988,19 @@ class MainTest(unittest.TestCase):
     # --- 確認的な判定の条件（事前に決めた条件を後から変えない） ---
 
     def two_repeat_rows(self):
-        """対象 P001〜P008 は 0/2 → 2/2、対照 P101〜P103 は 1/2 のまま（各期間2回ずつ）。"""
+        """
+        対象 P001〜P008 は 0/2 → 2/2、対照 P101〜P103 は 1/2 のまま（各期間2回ずつ。2ラウンドで1回ずつ尋ね、
+        対照は各期間の1つ目のラウンドだけ引用あり）。
+        """
         rows = []
-        dates_b, dates_a = ("2026-10-01", "2026-10-02"), ("2026-10-29", "2026-10-30")
-        for pid in TARGETS:
-            rows += make_rows("2026-10-01", dates_b, pid, cited=0, mentioned=0, repeats=2)
-            rows += make_rows("2026-10-29", dates_a, pid, cited=2, mentioned=0, repeats=2)
-        for pid in CONTROLS:
-            rows += make_rows("2026-10-01", dates_b, pid, cited=1, mentioned=0, repeats=2)
-            rows += make_rows("2026-10-29", dates_a, pid, cited=1, mentioned=0, repeats=2)
+        for (b_round, _b_dates), (a_round, _a_dates) in zip(BEFORE_ROUNDS, AFTER_ROUNDS):
+            for pid in TARGETS:
+                rows += make_rows(b_round, (b_round,), pid, cited=0, mentioned=0, repeats=1)
+                rows += make_rows(a_round, (a_round,), pid, cited=1, mentioned=0, repeats=1)
+            cited = 1 if b_round == BEFORE_ROUNDS[0][0] else 0
+            for pid in CONTROLS:
+                rows += make_rows(b_round, (b_round,), pid, cited=cited, mentioned=0, repeats=1)
+                rows += make_rows(a_round, (a_round,), pid, cited=cited, mentioned=0, repeats=1)
         return rows
 
     def test_changing_min_repeats_is_not_confirmatory(self):
@@ -1016,12 +1052,13 @@ class MainTest(unittest.TestCase):
         self.assertIn("対照がないため", out)
 
     def test_adjusted_diff_exactly_zero_end_to_end(self):
+        # 各ラウンドで同じパターンにする（率は変わらず、件数は各期間 6 件）
         rows = []
-        dates_b, dates_a = ("2026-10-01", "2026-10-02"), ("2026-10-29", "2026-10-30")
         for pid, b, a in (("P001", 0, 1), ("P002", 0, 1), ("P003", 0, 1), ("P004", 0, 1), ("P005", 1, 3),
                           ("P006", 1, 3), ("P101", 0, 1), ("P102", 0, 1), ("P103", 0, 2)):
-            rows += make_rows("2026-10-01", dates_b, pid, cited=b, mentioned=0)
-            rows += make_rows("2026-10-29", dates_a, pid, cited=a, mentioned=0)
+            for (b_round, b_dates), (a_round, a_dates) in zip(BEFORE_ROUNDS, AFTER_ROUNDS):
+                rows += make_rows(b_round, b_dates, pid, cited=b, mentioned=0)
+                rows += make_rows(a_round, a_dates, pid, cited=a, mentioned=0)
         self.write_workspace(rows)
         exp = self.write_experiment(target_prompts=", ".join(TARGETS[:6]), min_effect="")
         out = self.assert_ok(self.run_compare("--experiment", exp))
@@ -1038,6 +1075,182 @@ class MainTest(unittest.TestCase):
         out = self.assert_ok(self.run_compare("--experiment", exp))
         self.assertIn("確認的な判定（chatgpt / web / なし / GPT-5 Thinking/検索あり / JP / ja、自社の引用）: 改善シグナル",
                       out)
+
+    # --- 確認的な判定の前提（手順書 06: 反映日、ラウンドと changed_on の前後、一覧の版、ラウンドの数） ---
+
+    PRECONDITION_HEAD = "- 確認的な判定: 出さない（確認的な判定の前提を満たさない: "
+    PRECONDITION_TAIL = "）。すべて探索的な比較として扱う。"
+
+    def assert_precondition_not_met(self, result, *expected):
+        """
+        確認的な判定を出さず、「## 結論」の最初の行に前提を満たさない理由（expected の文をすべて含む）を示すこと。
+        標準エラーの要約も「すべて探索的」にそろえる。報告の本文を返す。
+        """
+        out = self.assert_ok(result)
+        first = section(out, "## 結論").strip().splitlines()[0]
+        self.assertTrue(first.startswith(self.PRECONDITION_HEAD), first)
+        self.assertTrue(first.endswith(self.PRECONDITION_TAIL), first)
+        for text in expected:
+            self.assertIn(text, first)
+        self.assertNotIn("確認的な判定（", out)
+        self.assertNotIn("（確認的）", out)
+        self.assertIn("（すべて探索的）", result.stderr)
+        self.assertNotIn("確認的な判定: ", result.stderr)
+        return out
+
+    def test_precondition_changed_on_missing(self):
+        # 反映日がわからない変更は、確認的な判定に使わない。今ある警告もそのまま出す
+        exp = self.write_experiment(changed_on="")
+        out = self.assert_precondition_not_met(self.run_compare("--experiment", exp), "changed_on")
+        self.assertIn("改善シグナル（探索的）", out)
+        self.assertIn("実験の記録に changed_on がない", section(out, "## 警告"))
+
+    def test_precondition_baseline_answer_on_or_after_changed_on(self):
+        # 変更前のラウンド 2026-10-08 は 10-08 と 10-09 に観測した。changed_on と同じ日の回答も前提を満たさない。
+        # 各ラウンドの有効な回答は、chatgpt が1日目 24 件・2日目 12 件、gemini がラウンドの日に 3 件。
+        # 2026-10-01 には出典が不明の回答（言及は有効）が1件ある（10-01）
+        for changed_on, n in (("2026-10-09", 12), ("2026-10-08", 39), ("2026-10-02", 51)):
+            with self.subTest(changed_on=changed_on):
+                exp = self.write_experiment(changed_on=changed_on)
+                self.assert_precondition_not_met(
+                    self.run_compare("--experiment", exp),
+                    "変更前のラウンドに、changed_on（{}）以降（同じ日を含む）に観測した有効な回答が {} 件".format(
+                        changed_on, n))
+
+    def test_precondition_after_answer_on_or_before_changed_on(self):
+        # 変更後のラウンド 2026-10-29 は 10-29 と 10-30 に観測した。changed_on と同じ日の回答も前提を満たさない。
+        # 件数の内訳は、変更前のテストと同じ（1日目 24 件 + gemini 3 件、2日目 12 件）
+        for changed_on, n in (("2026-10-29", 27), ("2026-10-30", 39), ("2026-11-05", 66)):
+            with self.subTest(changed_on=changed_on):
+                exp = self.write_experiment(changed_on=changed_on)
+                out = self.assert_precondition_not_met(
+                    self.run_compare("--experiment", exp),
+                    "変更後のラウンドに、changed_on（{}）以前（同じ日を含む）に観測した有効な回答が {} 件".format(
+                        changed_on, n))
+                self.assertNotIn("変更前のラウンドに", section(out, "## 結論"))
+
+    def test_precondition_dates_next_to_changed_on_are_met(self):
+        # 変更前の最後の観測日の翌日と、変更後の最初の観測日の前日なら、前提を満たす
+        for changed_on in ("2026-10-10", "2026-10-28"):
+            with self.subTest(changed_on=changed_on):
+                exp = self.write_experiment(changed_on=changed_on)
+                self.assertIn(CONFIRMED_IMPROVED, self.assert_ok(self.run_compare("--experiment", exp)))
+
+    def test_precondition_date_from_round_name(self):
+        # observed_at に日付がない有効な回答は、ラウンド名の日付で前後を確かめる
+        rows = standard_rows()
+        for row in rows:
+            if row["round"] in ("2026-10-08", "2026-11-05") and row["prompt_id"] == "P001":
+                row["observed_at"] = "時刻のみ 10:00"
+        self.write_workspace(rows)
+        exp = self.write_experiment()
+        out = self.assert_ok(self.run_compare("--experiment", exp))
+        self.assertIn(CONFIRMED_IMPROVED, out)
+        self.assertIn("observed_at に日付がない有効な回答", section(out, "## 警告"))
+
+    def test_precondition_undated_valid_answer(self):
+        # ラウンド名が日付でなければ、observed_at の日付を読めない有効な回答の前後を確かめられない
+        names = {"2026-10-01": "base-a", "2026-10-08": "base-b", "2026-10-29": "after-a", "2026-11-05": "after-b"}
+        rows = standard_rows()
+        for row in rows:
+            row["round"] = names[row["round"]]
+        self.write_workspace(rows)
+        exp = self.write_experiment(baseline_rounds="base-a, base-b", after_rounds="after-a, after-b")
+        # observed_at の日付を読めれば、ラウンド名が日付でなくても前提を満たす
+        self.assertIn(CONFIRMED_IMPROVED, self.assert_ok(self.run_compare("--experiment", exp)))
+        for row in rows:
+            if row["round"] == "after-b" and row["prompt_id"] == "P001" and row["service"] == "chatgpt":
+                row["observed_at"] = "不明"
+        self.write_workspace(rows)
+        self.assert_precondition_not_met(self.run_compare("--experiment", exp),
+                                         "observed_at の日付を読めない有効な回答が 3 件")
+
+    def test_precondition_entities_sha(self):
+        cases = (
+            ({"entities_sha256": ""}, {}, "実験の記録に entities_sha256 がない"),
+            ({"entities_sha256": "1a2b"}, {}, "実験の記録の entities_sha256 の形式が不正"),
+            ({"entities_sha256": "要確認"}, {}, "実験の記録の entities_sha256 の形式が不正"),
+            ({}, {"entities_sha256": None}, "observations.run.json に entities_sha256 がない"),
+            ({"entities_sha256": "f" * 64}, {}, "entities_sha256 が observations.run.json の値と違う"),
+        )
+        for exp_values, info, expected in cases:
+            with self.subTest(expected=expected, exp=exp_values, info=info):
+                self.write_run_info(**info)
+                exp = self.write_experiment(**exp_values)
+                out = self.assert_precondition_not_met(self.run_compare("--experiment", exp), expected)
+                self.assertIn("entities_sha256", section(out, "## 警告"))  # 今ある警告も出す
+                self.assertNotIn("prompts_sha256", section(out, "## 結論"))
+
+    def test_precondition_prompts_sha(self):
+        cases = (
+            ({"prompts_sha256": ""}, {}, "実験の記録に prompts_sha256 がない"),
+            ({"prompts_sha256": PROMPTS_SHA[:11]}, {}, "実験の記録の prompts_sha256 の形式が不正"),
+            ({"prompts_sha256": "要確認"}, {}, "実験の記録の prompts_sha256 の形式が不正"),
+            ({}, {"prompts_sha256": None}, "observations.run.json に prompts_sha256 がない"),
+            ({"prompts_sha256": "e" * 64}, {}, "prompts_sha256 が observations.run.json の値と違う"),
+        )
+        for exp_values, info, expected in cases:
+            with self.subTest(expected=expected, exp=exp_values, info=info):
+                self.write_run_info(**info)
+                exp = self.write_experiment(**exp_values)
+                out = self.assert_precondition_not_met(self.run_compare("--experiment", exp), expected)
+                self.assertNotIn("entities_sha256", section(out, "## 結論"))
+
+    def test_warning_prompts_sha_differs(self):
+        exp = self.write_experiment(prompts_sha256="e" * 64)
+        result = self.run_compare("--experiment", exp)
+        warnings = section(self.assert_ok(result), "## 警告")
+        self.assertIn("実験の記録の prompts_sha256（eeeeeeeeeeee）と observations.run.json の値（9f8e7d6c5b4a）が違う。"
+                      "プロンプトの一覧を変えた", warnings)
+        self.assertIn("prompts_sha256", result.stderr)
+
+    def test_prompts_sha_prefix_matches(self):
+        # 先頭 12 桁以上なら前方一致で照合し、大文字・小文字は区別しない（entities_sha256 と同じ決まり）
+        exp = self.write_experiment(prompts_sha256=PROMPTS_SHA[:12].upper())
+        out = self.assert_ok(self.run_compare("--experiment", exp))
+        self.assertIn(CONFIRMED_IMPROVED, out)
+        self.assertNotIn("prompts_sha256", section(out, "## 警告"))
+
+    def test_precondition_without_run_json(self):
+        os.remove(os.path.join(self.ws, "observations.run.json"))
+        exp = self.write_experiment()
+        self.assert_precondition_not_met(self.run_compare("--experiment", exp),
+                                         "observations.run.json", "entities_sha256", "prompts_sha256")
+
+    def test_precondition_one_round_each(self):
+        # 変更前・変更後とも1ラウンドだけ（数は同じ）。理由は「; 」で区切って並べる
+        exp = self.write_experiment(baseline_rounds="2026-10-01", after_rounds="2026-10-29")
+        out = self.assert_precondition_not_met(self.run_compare("--experiment", exp),
+                                               "baseline_rounds が 1 個", "after_rounds が 1 個")
+        first = section(out, "## 結論").strip().splitlines()[0]
+        self.assertRegex(first, r"baseline_rounds が 1 個[^;]*; after_rounds が 1 個")
+        self.assertNotIn("数が違う", first)
+        self.assertIn("改善シグナル（探索的）", out)
+
+    def test_precondition_one_baseline_round(self):
+        exp = self.write_experiment(baseline_rounds="2026-10-08")
+        out = self.assert_precondition_not_met(self.run_compare("--experiment", exp),
+                                               "baseline_rounds が 1 個", "数が違う")
+        self.assertNotIn("after_rounds が", section(out, "## 結論"))
+
+    def test_precondition_round_counts_differ(self):
+        # 変更後のラウンドを1つ足した（2026-11-12）。どちらも2つ以上だが、数が違う
+        rows = standard_rows()
+        rows += [dict(row, round="2026-11-12", observed_at="2026-11-12 10:00") for row in rows
+                 if row["round"] == "2026-11-05"]
+        self.write_workspace(rows)
+        exp = self.write_experiment(after_rounds="2026-10-29, 2026-11-05, 2026-11-12")
+        out = self.assert_precondition_not_met(self.run_compare("--experiment", exp),
+                                               "baseline_rounds（2 個）と after_rounds（3 個）の数が違う")
+        self.assertNotIn("2 個以上", section(out, "## 結論"))
+
+    def test_precondition_is_checked_after_other_conditions(self):
+        # コマンドラインで記録の条件を変えたときは、今までどおりその理由だけを示す
+        exp = self.write_experiment(changed_on="", baseline_rounds="2026-10-01", after_rounds="2026-10-29")
+        out = self.assert_ok(self.run_compare("--experiment", exp, "--alpha", "0.1"))
+        conclusion = section(out, "## 結論")
+        self.assertIn("確認的な判定: 出さない（コマンドラインで実験の記録の条件を変えたか、空の欄を補った: --alpha）", conclusion)
+        self.assertNotIn("前提", conclusion)
 
     # --- Windows で作った入力と、Windows の標準出力 ---
 
@@ -1369,16 +1582,16 @@ class MainTest(unittest.TestCase):
     def rows_split_by_region(self):
         """
         chatgpt の組が region の表記で2つに割れている。JP の P001〜P006 は引用が 0/3 → 2/3（上がる）、
-        jp の P007〜P012 は 2/3 → 0/3（下がる）。
+        jp の P007〜P012 は 2/3 → 0/3（下がる）。前後2ラウンドずつ、各ラウンドで同じパターン。
         """
         rows = []
-        dates_b, dates_a = ("2026-10-01", "2026-10-02"), ("2026-10-29", "2026-10-30")
         for i in range(12):
             pid = "P{:03d}".format(i + 1)
             group = dict(CHATGPT, region="JP" if i < 6 else "jp")
             b, a = (0, 2) if i < 6 else (2, 0)
-            rows += make_rows("2026-10-01", dates_b, pid, cited=b, mentioned=0, group=group)
-            rows += make_rows("2026-10-29", dates_a, pid, cited=a, mentioned=0, group=group)
+            for (b_round, b_dates), (a_round, a_dates) in zip(BEFORE_ROUNDS, AFTER_ROUNDS):
+                rows += make_rows(b_round, b_dates, pid, cited=b, mentioned=0, group=group)
+                rows += make_rows(a_round, a_dates, pid, cited=a, mentioned=0, group=group)
         return rows
 
     @staticmethod

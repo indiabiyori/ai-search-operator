@@ -49,6 +49,16 @@ normalize_observations.py が作った observations.csv を読み、次のどち
     都合のよい変更後のラウンドや対照を、結果を見てから選べてしまうため
   - --min-repeats を既定（3）から変えた。実験の記録にはこの欄がないので、既定の値を事前の条件とみなす
   - --group-by を既定から変えた（primary_group と組が対応しない）
+  - 確認的な判定の前提（手順書 06 の手順1・4・6）を満たさない。上の条件がすべてそろったときにだけ確かめ、
+    当たるものをすべて「確認的な判定の前提を満たさない: 理由1; 理由2」の形で「## 結論」に示す。
+    - 実験の記録に changed_on がない（反映日がわからない変更は、確認的な判定に使わない）
+    - 変更前のラウンドの有効な回答に changed_on 以降（同じ日を含む）の日付がある。変更後のラウンドの有効な
+      回答に changed_on 以前（同じ日を含む）の日付がある。日付は observed_at から読み、読めなければラウンド名
+      から読む。どちらからも読めない有効な回答があれば、前後を確かめられないので前提を満たさない
+    - entities_sha256 か prompts_sha256 が、実験の記録にない・形式が不正・observations.run.json にない（null）・
+      一致しない（途中で entities.csv や prompts.csv を変えていないことを確かめられない）
+    - baseline_rounds か after_rounds が2つ未満（MIN_EXPERIMENT_ROUNDS）、または baseline_rounds と
+      after_rounds の数が違う
   control_prompts が空のまま（対照を置かない実験）は、事前の条件どおりなので確認的な判定を出し、
   「対照がないため、サービス側の変動と区別できない」と添える。
   primary_group の組が判定の表にないときは、確認的な判定を「判定不能」とし、理由を分けて示す。
@@ -153,6 +163,8 @@ DEFAULT_GROUP_BY = ("service", "surface", "login", "mode", "region", "language")
 MIN_CHANGED = 6
 DEFAULT_ALPHA = 0.05
 DEFAULT_MIN_REPEATS = 3
+# 確認的な判定に要る、変更前・変更後それぞれのラウンドの最小の数（手順書 06: 変更前は2回以上、変更後は同じ数）
+MIN_EXPERIMENT_ROUNDS = 2
 
 METRIC_LABELS = {
     "mention": "自社の言及",
@@ -175,8 +187,9 @@ RATE_NOTE = "率は「件数/分母（割合）」で示す。回答どうしは
 
 # observed_at の日付。normalize_observations.py と同じく、区切りは - か /、月と日は1〜2桁で、文中から探す
 _DATE_RE = re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
-# entities_sha256 は observations.run.json の値（16進 64 桁）か、その先頭 12 桁以上
+# 実験の記録の entities_sha256 と prompts_sha256 は、observations.run.json の値（16進 64 桁）か、その先頭 12 桁以上
 _SHA_RE = re.compile(r"^[0-9a-f]{12,64}$")
+_SHA_FIELDS = ("entities_sha256", "prompts_sha256")
 # プロンプトの ID の区切りに誤って使われやすい文字（日本語の読点、全角・半角のカンマなど）
 _ID_SEPARATOR_HINT_CHARS = "、，､・；;"
 _REASON_ONE_SIDE = "片方の期間にしかない"
@@ -453,7 +466,8 @@ def parse_experiment(path):
     """
     実験の記録（experiments/E001.md）の先頭の欄を読む。返り値のキー: id, targets, controls,
     baseline_rounds, after_rounds, primary_metric（なければ None）, primary_group（6要素のタプルか None）,
-    alpha, min_effect（なければ None）, entities_sha256, changed_on など。
+    alpha, min_effect（なければ None）, entities_sha256, prompts_sha256, changed_on など。
+    entities_sha256 と prompts_sha256 は、前後の空白を除いて小文字にそろえる（形式は判定のときに確かめる）。
     """
     if not os.path.isfile(path):
         raise InputError("実験の記録がありません: {}".format(path))
@@ -497,6 +511,7 @@ def parse_experiment(path):
         "alpha": alpha,
         "min_effect": min_effect,
         "entities_sha256": meta.get("entities_sha256", "").strip().lower(),
+        "prompts_sha256": meta.get("prompts_sha256", "").strip().lower(),
         "changed_on": changed_on,
     }
 
@@ -1414,7 +1429,82 @@ def _experiment_warnings(before_rows, after_rows, experiment, run_info, before_r
     elif not current.startswith(recorded):
         warnings.append("実験の記録の entities_sha256（{}）と observations.run.json の値（{}）が違う。"
                         "表記ゆれの一覧を変えたので、過去の判定も変わっている".format(recorded[:12], current[:12]))
+    # prompts_sha256 は、ない・形式が不正のときは確認的な判定の前提（_experiment_preconditions）で示し、
+    # 警告は値が違うときだけ出す
+    recorded = experiment.get("prompts_sha256", "")
+    current = str((run_info or {}).get("prompts_sha256") or "").strip().lower()
+    if recorded and _SHA_RE.match(recorded) and current and not current.startswith(recorded):
+        warnings.append("実験の記録の prompts_sha256（{}）と observations.run.json の値（{}）が違う。"
+                        "プロンプトの一覧を変えた".format(recorded[:12], current[:12]))
     return warnings
+
+
+def _sha_precondition(experiment, run_info, name):
+    # type: (dict, object, str) -> str
+    """
+    実験の記録の name（entities_sha256 か prompts_sha256）が、確認的な判定の前提を満たさない理由。満たせば空。
+    記録の値は 16進 12〜64 桁（_SHA_RE）で、observations.run.json の値と前方一致すれば満たす。
+    """
+    recorded = experiment.get(name, "")
+    if not recorded:
+        return "実験の記録に {} がない".format(name)
+    if not _SHA_RE.match(recorded):
+        return "実験の記録の {} の形式が不正（16進 12〜64 桁で書く）".format(name)
+    if run_info is None:
+        return "observations.run.json がないか読めないため、{} を確かめられない".format(name)
+    current = str(run_info.get(name) or "").strip().lower()
+    if not current:
+        return "observations.run.json に {} がない".format(name)
+    if not current.startswith(recorded):
+        return "{} が observations.run.json の値と違う".format(name)
+    return ""
+
+
+def _experiment_preconditions(experiment, run_info, before_rows, after_rows, before_rounds, after_rounds):
+    # type: (dict, object, list, list, list, list) -> list
+    """
+    確認的な判定の前提（手順書 06 の手順1・4・6）を満たさない理由の一覧。満たせば空。
+    ほかの条件（primary_group、target_prompts、コマンドラインでの変更、--group-by）がそろったときにだけ呼ぶ。
+    日付は _experiment_warnings と同じく、有効な回答（valid_mention が 1）の observed_at から読み、読めなければ
+    ラウンド名から読む。changed_on と同じ日の回答は、反映の前か後か区別できないので前提を満たさない。
+    """
+    reasons = []
+    changed = _parse_date(experiment.get("changed_on", ""))
+    if changed is None:
+        reasons.append("実験の記録に changed_on（本番に反映した日）がない")
+    else:
+        late = early = undated = 0
+        for rows, is_before in ((before_rows, True), (after_rows, False)):
+            for row in rows:
+                if not _is_valid(row):
+                    continue  # 未記入のひな形などは、観測した日を表さない
+                day = _row_date(row) or _parse_date(row.get("round", ""))
+                if day is None:
+                    undated += 1
+                elif is_before and day >= changed:
+                    late += 1
+                elif not is_before and day <= changed:
+                    early += 1
+        if late:
+            reasons.append("変更前のラウンドに、changed_on（{}）以降（同じ日を含む）に観測した有効な回答が {} 件"
+                           "ある".format(changed.isoformat(), late))
+        if early:
+            reasons.append("変更後のラウンドに、changed_on（{}）以前（同じ日を含む）に観測した有効な回答が {} 件"
+                           "ある".format(changed.isoformat(), early))
+        if undated:
+            reasons.append("observed_at の日付を読めない有効な回答が {} 件ある（ラウンド名からも読めず、変更の前か後かを"
+                           "確かめられない）".format(undated))
+    for name in _SHA_FIELDS:
+        reason = _sha_precondition(experiment, run_info, name)
+        if reason:
+            reasons.append(reason)
+    for field, rounds in (("baseline_rounds", before_rounds), ("after_rounds", after_rounds)):
+        if len(rounds) < MIN_EXPERIMENT_ROUNDS:
+            reasons.append("{} が {} 個（{} 個以上にする）".format(field, len(rounds), MIN_EXPERIMENT_ROUNDS))
+    if len(before_rounds) != len(after_rounds):
+        reasons.append("baseline_rounds（{} 個）と after_rounds（{} 個）の数が違う".format(
+            len(before_rounds), len(after_rounds)))
+    return reasons
 
 
 def _results_table(group_results, confirm, alpha):
@@ -1621,6 +1711,9 @@ def run_compare(args, rows, run_info, group_by, warnings):
         raise InputError("同じプロンプトが対象と対照の両方にあります: {}".format(", ".join(overlap)))
     _check_rounds(rows, before, "変更前")
     _check_rounds(rows, after, "変更後")
+    before_set, after_set = set(before), set(after)
+    before_rows = [r for r in rows if r.get("round") in before_set]
+    after_rows = [r for r in rows if r.get("round") in after_set]
 
     metrics = list(JUDGED_METRICS) if args.metric in (None, "all") else [args.metric]
     confirm_label = None
@@ -1639,15 +1732,19 @@ def run_compare(args, rows, run_info, group_by, warnings):
         elif group_by != DEFAULT_GROUP_BY:
             no_confirm_reason = "--group-by を既定から変えたため、primary_group と組が対応しない"
         else:
-            confirm_label = "{}、{}".format(group_label(primary_group), METRIC_LABELS[primary_metric])
-            if primary_metric not in metrics:
-                metrics.append(primary_metric)
-                notes.append("--metric で選んでいないが、実験の primary_metric（{}）を加えた".format(primary_metric))
-            metrics = [m for m in JUDGED_METRICS if m in metrics]
+            # 確認的な判定を出す条件がそろったので、前提（反映日、ラウンドと changed_on の前後、一覧の版、
+            # ラウンドの数）を確かめる。満たさなければ、理由をすべて並べてすべて探索的とする
+            unmet = _experiment_preconditions(experiment, run_info, before_rows, after_rows, before, after)
+            if unmet:
+                no_confirm_reason = "確認的な判定の前提を満たさない: " + "; ".join(unmet)
+            else:
+                confirm_label = "{}、{}".format(group_label(primary_group), METRIC_LABELS[primary_metric])
+                if primary_metric not in metrics:
+                    metrics.append(primary_metric)
+                    notes.append("--metric で選んでいないが、実験の primary_metric（{}）を加えた".format(
+                        primary_metric))
+                metrics = [m for m in JUDGED_METRICS if m in metrics]
 
-    before_set, after_set = set(before), set(after)
-    before_rows = [r for r in rows if r.get("round") in before_set]
-    after_rows = [r for r in rows if r.get("round") in after_set]
     results = compare_groups(before_rows, after_rows, targets, controls, metrics, group_by, alpha,
                              min_repeats, min_effect)
     empty_groups, empty_counts = empty_compare_groups(before_rows, after_rows, group_by)
