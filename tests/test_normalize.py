@@ -7,10 +7,12 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 
 # python3 -m unittest tests.test_normalize でも、discover -s tests でも helpers を読めるようにする
@@ -917,25 +919,74 @@ class MainTest(TempDirCase):
     def read_rows(self, path):
         return common.read_csv(path)[1]
 
+    def assert_symlink_refused(self, result, ws, name):
+        # 何も書かずに入力の誤り（終了コード 2）で止まり、ほかの2つの出力も一時ファイルも作らない
+        link = os.path.join(ws, name)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("{} がシンボリックリンクです".format(link), result.stderr)
+        self.assertIn("リンクを外すか、--out-dir で別のフォルダを指定してください", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(os.path.islink(link), name)
+        self.assertEqual(sorted(set(os.listdir(ws)) - {"answers", "entities.csv", "prompts.csv"}), [name])
+
     @unittest.skipIf(not hasattr(os, "symlink") or sys.platform.startswith("win"), "シンボリックリンクを作れない環境")
-    def test_symlinked_outputs_update_link_target(self):
-        # 一時ファイルに書いてから置き換える方式で、リンクそのものを普通のファイルに変えない
+    def test_symlinked_outputs_refused(self):
+        # 信頼できない作業フォルダで、出力先のリンクを外のファイルに向けて上書きさせられないようにする
+        for name in ("observations.csv", "citations.csv", "observations.run.json"):
+            with self.subTest(name=name):
+                ws = self.copy_workspace("ai-search-" + name)
+                outside = os.path.join(self.tmp, "outside-" + name)
+                with open(outside, "w", encoding="utf-8") as f:
+                    f.write("old\n")
+                os.symlink(outside, os.path.join(ws, name))
+                result = self.run_main(["--workspace", ws])
+                self.assert_symlink_refused(result, ws, name)
+                with open(outside, encoding="utf-8") as f:
+                    self.assertEqual(f.read(), "old\n", name)
+
+    @unittest.skipIf(not hasattr(os, "symlink") or sys.platform.startswith("win"), "シンボリックリンクを作れない環境")
+    def test_broken_symlinked_outputs_refused(self):
+        # リンク先のファイルがなくても、リンクをたどってファイルを作らない
+        for name in ("observations.csv", "citations.csv", "observations.run.json"):
+            with self.subTest(name=name):
+                ws = self.copy_workspace("ai-search-" + name)
+                outside = os.path.join(self.tmp, "missing-" + name)
+                os.symlink(outside, os.path.join(ws, name))
+                result = self.run_main(["--workspace", ws])
+                self.assert_symlink_refused(result, ws, name)
+                self.assertFalse(os.path.lexists(outside), name)
+
+    @unittest.skipIf(not hasattr(os, "symlink") or sys.platform.startswith("win"), "シンボリックリンクを作れない環境")
+    def test_symlinked_output_folder_allowed(self):
+        # 出力先のフォルダ自体（--out-dir か --workspace）がリンクなのは、利用者が指定したものなので書く
         ws = self.copy_workspace()
-        shared = os.path.join(self.tmp, "shared")
-        os.makedirs(shared)
-        for name in ("observations.csv", "citations.csv", "observations.run.json"):
-            target = os.path.join(shared, name)
-            with open(target, "w", encoding="utf-8") as f:
-                f.write("old\n")
-            os.symlink(target, os.path.join(ws, name))
-        result = self.run_main([])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ("observations.csv", "citations.csv", "observations.run.json"):
-            link = os.path.join(ws, name)
-            self.assertTrue(os.path.islink(link), name)
-            with open(os.path.join(shared, name), encoding="utf-8-sig") as f:
-                self.assertNotEqual(f.read(), "old\n", name)
-        self.assertEqual(len(self.read_rows(os.path.join(shared, "observations.csv"))), 7)
+        for option in ("--out-dir", "--workspace"):
+            with self.subTest(option=option):
+                real = os.path.join(self.tmp, "real" + option)
+                link = os.path.join(self.tmp, "link" + option)
+                if option == "--out-dir":
+                    os.makedirs(real)
+                    args = ["--workspace", ws, "--out-dir", link]
+                else:
+                    shutil.copytree(WORKSPACE, real)
+                    args = ["--workspace", link]
+                os.symlink(real, link)
+                result = self.run_main(args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for name in ("observations.csv", "citations.csv", "observations.run.json"):
+                    path = os.path.join(real, name)
+                    self.assertTrue(os.path.isfile(path) and not os.path.islink(path), name)
+                self.assertEqual(len(self.read_rows(os.path.join(real, "observations.csv"))), 7)
+
+    @unittest.skipIf(not hasattr(os, "symlink") or sys.platform.startswith("win"), "シンボリックリンクを作れない環境")
+    def test_check_replaceable_does_not_follow_links(self):
+        # 書けるかを確かめるときも、リンクをたどってリンク先のファイルを作らない
+        outside = os.path.join(self.tmp, "missing.csv")
+        link = os.path.join(self.tmp, "observations.csv")
+        os.symlink(outside, link)
+        with self.assertRaises(OSError):
+            norm._check_replaceable(link)
+        self.assertFalse(os.path.lexists(outside))
 
     def test_fixture_workspace(self):
         # Review Focus 1 の確認が git の改行の変換で消えていないこと（消えていればここで落とす）
@@ -1864,6 +1915,45 @@ class AtomicOutputTest(TempDirCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.leftovers(), [])
         self.assertEqual(len(common.read_csv(os.path.join(self.ws, "observations.csv"))[1]), 8)
+
+    @unittest.skipIf(not hasattr(os, "symlink") or sys.platform.startswith("win"), "シンボリックリンクを作れない環境")
+    def test_existing_temporary_name_not_followed(self):
+        # 一時ファイルと同じ名前のリンクがすでにあっても、それを開いてリンク先に書かず、別の名前で作る
+        outside = os.path.join(self.tmp, "outside.txt")
+        with open(outside, "w", encoding="utf-8") as f:
+            f.write("old\n")
+        fixed = uuid.UUID(int=1)
+        trap = os.path.join(self.ws, ".observations.csv.{}.tmp".format(fixed.hex[:12]))
+        os.symlink(outside, trap)
+        real_uuid4 = uuid.uuid4
+        calls = []
+
+        def fake_uuid4():
+            calls.append(1)
+            return fixed if len(calls) == 1 else real_uuid4()
+
+        err = io.StringIO()
+        with mock.patch.object(norm.uuid, "uuid4", side_effect=fake_uuid4):
+            with contextlib.redirect_stderr(err):
+                code = norm.main(["--workspace", self.ws])
+        self.assertEqual(code, 0, err.getvalue())
+        with open(outside, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "old\n")
+        self.assertTrue(os.path.islink(trap))  # 自分で作っていないものは消さない
+        obs = os.path.join(self.ws, "observations.csv")
+        self.assertFalse(os.path.islink(obs))
+        self.assertEqual(len(common.read_csv(obs)[1]), 8)
+
+    @unittest.skipIf(not hasattr(os, "umask") or sys.platform.startswith("win"), "umask のない環境")
+    def test_outputs_follow_umask(self):
+        # 一時ファイルを置き換えるので、出力の権限は一時ファイルの権限になる。open(…, "w") で作ったときと同じにする
+        mask = os.umask(0)
+        os.umask(mask)
+        result = helpers.run_script("normalize_observations", ["--workspace", self.ws], cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("observations.csv", "citations.csv", "observations.run.json"):
+            mode = stat.S_IMODE(os.stat(os.path.join(self.ws, name)).st_mode)
+            self.assertEqual(mode, 0o666 & ~mask, name)
 
 
 class SurrogateNameTest(TempDirCase):

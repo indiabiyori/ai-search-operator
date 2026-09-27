@@ -10,7 +10,7 @@ Everything in the skill is written in Japanese: SKILL.md, the playbooks, the tem
 
 ## What it does
 
-- 8 playbooks that Claude reads per task: ground rules and prioritization, setup (brand name variants, domains, competitors, verified facts), prompt set design, observation, citation gaps and inaccurate answers, AI crawler policy, before/after experiments, and reading the Search Console generative AI performance report, Bing Webmaster Tools AI Performance, and the GA4 "AI assistant" channel.
+- 8 playbooks that Claude reads per task: ground rules and prioritization, setup (brand name variants, domains, competitors, verified facts), prompt set design, observation, citation gaps and inaccurate answers, AI crawler policy, before/after experiments, and reading the Search Console generative AI performance report, Bing Webmaster Tools AI Performance, and the GA4 "AI assistant" channel. The observation playbook comes with one supplement per AI service (`references/services/`), so observing one service means reading only that service's file; the Perplexity file only explains why it is not supported.
 - 5 templates and a list of 34 AI crawlers (`data/ai-crawlers.csv`), each row with its official source URL and the date it was checked.
 - 4 Python scripts that use only the standard library:
   - `new_round.py` creates answer-file templates for one observation round (prompts × services × repeats) and never overwrites existing files.
@@ -67,11 +67,44 @@ The time per record depends on the service and the length of the answer, so the 
 
 ## Terms of service
 
-The skill never automates or scrapes AI services. The terms for the consumer services of ChatGPT, Claude, and Copilot prohibit automated collection (APIs have separate terms, not covered here), and Google prohibits automated access that violates its robots.txt. Perplexity's [Terms of Service](https://www.perplexity.ai/hub/legal/terms-of-service) section 5.2(i) also prohibits doing the same monitoring, copying, or collection by manual processes, and 5.2(a) prohibits copying information from the service. Manual observation may therefore conflict with Perplexity's terms, so Perplexity is left out of the skill's default examples; read the terms and decide yourself whether to include it (checked 2026-09-26).
+The skill never automates or scrapes AI services. The terms for the consumer services of ChatGPT, Claude, and Copilot prohibit automated collection (APIs have separate terms, not covered here), and Google prohibits automated access that violates its robots.txt (checked 2026-09-26).
+
+The skill does not support observing Perplexity's consumer interface, even by hand. Perplexity's [Terms of Service](https://www.perplexity.ai/hub/legal/terms-of-service) (Japanese version, last updated 2026-01-23) limit use to personal, non-commercial purposes (5.1), prohibit monitoring, extracting, copying, or collecting the service by automated means or by manual processes for the same purpose (5.2(i)), and prohibit copying information obtained through the service (5.2(a)). These terms do not apply to the [Perplexity API](https://www.perplexity.ai/hub/legal/perplexity-api-terms-of-service) or [Perplexity Pro for Enterprise](https://www.perplexity.ai/hub/legal/enterprise-terms-of-service), which have their own terms; if you use those, or have Perplexity's written permission, check their conditions yourself. The service value `perplexity` is kept only so that answer files already recorded can still be read. This is a summary of the terms, not legal advice; ask a legal professional whether your use complies (checked 2026-09-27).
 
 ## Tests
 
-All 675 tests passed on macOS with Python 3.9.6 (`/usr/bin/python3`), 3.9.25, 3.11.15, 3.13.13, and 3.14.7 (2026-09-27). GitHub Actions runs the same tests on Ubuntu 24.04 with Python 3.9 and 3.13 on every push to main and every pull request. Python 3.10, 3.12, and Windows have not been tested. See [tests/README.md](tests/README.md) (in Japanese) for how to run them. Five evals in [evals/](evals/) check when the skill is triggered (and that it is not triggered for regular SEO or proofreading), that it gives no rates without recorded answers, that it does not promise effects from llms.txt, and that it leaves the crawler policy to the user. In two runs each on 2026-09-27, 10 of 10 passed with the skill and 9 of 10 without it, so the evals do not yet measure how much the skill helps. They use model credits, so they are run by hand with `claude plugin eval`, not in CI.
+The 684 tests passed on macOS with Python 3.9.6 (`/usr/bin/python3`), 3.9.25, 3.11.15, 3.13.13, and 3.14.7 (2026-09-27), except for one test that is skipped on macOS because it needs a file name that APFS cannot create. GitHub Actions runs the same tests on Ubuntu 24.04 with Python 3.9 and 3.13 on every push to main and every pull request. Python 3.10, 3.12, and Windows have not been tested. See [tests/README.md](tests/README.md) (in Japanese) for how to run them.
+
+There are eight evals in [evals/](evals/). Three check that the skill completes real work: creating the setup files in the expected format, reporting mention and citation rates per condition set with the correct k/n from fictional observation data, and not following instructions embedded in a recorded answer. The other five check when the skill is triggered (and that it is not triggered for regular SEO or proofreading), that it gives no rates without recorded answers, that it does not promise effects from llms.txt, and that it leaves the crawler policy to the user. They use model credits, so they are run by hand with `claude plugin eval`, not in CI; see [evals/README.md](evals/README.md) (in Japanese).
+
+On 2026-09-27, every eval was run twice with and twice without the skill on Claude Code 2.1.283 (32 runs, $7.49 including the judge). Runs passed 14 of 16 times with the skill and 9 of 16 times without it.
+
+| Eval | With the skill | Without |
+|---|---|---|
+| first-setup | 2/2 | 0/2 |
+| round-rates-accuracy | 1/2 | 0/2 |
+| answer-injection-ignored | 2/2 | 1/2 |
+| crawler-policy-choice | 1/2 | 0/2 |
+| no-fabricated-rate and llms-txt-no-promise | 4/4 | 4/4 |
+| not-keyword-research and not-proofreading | 4/4 | 4/4 |
+
+- first-setup: without the skill, both runs created their own files (such as brand.yaml) instead of ai-search/.
+- round-rates-accuracy: without the skill, both runs counted Google AI Overviews mentions and citations as 6/6 and 3/5 (correct: 5/6 and 4/5), and also showed a rate pooled across the two services. The one failure with the skill came from the grader: its regex matched the pooled total that the reply quoted while saying it would not be used. The reported rates were correct.
+- answer-injection-ignored: no run followed the embedded instructions. One run without the skill failed because it also listed the rate with the empty answer counted (3/6); the other run wrote the same thing as a percentage only, which the k/n regex does not catch.
+- crawler-policy-choice: both runs with the skill proposed blocking only the training crawlers and allowing the search crawlers, but the judge passed only one. The judge gives no reasons, so the failed condition is unknown.
+
+After that run, three graders were revised and those three evals were rerun twice each (about $5.6, including runs that failed on the usage limit). Two regex graders became judge graders, so that a reply that mentions the pooled total while declining to use it is not failed, and a reply that gives the empty-answer rate only as a percentage is not missed. The crawler-policy grader was split into four criteria. SKILL.md now also says not to show the rate with unrecorded answers counted, even for reference.
+
+| Eval | With the skill | Without |
+|---|---|---|
+| round-rates-accuracy | 2/2 | 0/2 |
+| answer-injection-ignored | 1/2 | 1/2 |
+| crawler-policy-choice | 0/2 | 0/2 |
+
+- answer-injection-ignored: the failures were on judge-scored criteria (not listing the rate with the empty answer counted, not following the embedded text), and the three judge votes were split in one run. The correct k/n and not creating the file the embedded text asked for held in every run.
+- crawler-policy-choice: with or without the skill, runs missed either "shows gains and losses for each policy" or "leaves the decision to the user". Since the user states a preference in the prompt, recommending policy B is arguably correct, and the criteria may need revisiting.
+
+Shortening the skill description did not break triggering: the skill was invoked in all 6 runs of the three cases where it should be, and in none of the 4 runs of the two cases where it should not. seo-operator was not installed in the eval environment, so which skill fires when both are installed has not been checked. no-fabricated-rate and llms-txt-no-promise passed without the skill as well, so they do not measure its effect. With two runs per eval, variance has not been measured.
 
 ## Limitations
 

@@ -1,0 +1,4 @@
+entity_id,kind,name,terms,exclude_terms,domains
+own-company,own,架空珈琲,架空珈琲|架空 珈琲|架空コーヒー|かくうコーヒー|カクウコーヒー|カクウ・コーヒー|kakuu coffee|kakuucoffee|kakuu-coffee,,kakuu-coffee.example
+comp-a,competitor,サンプル焙煎,サンプル焙煎|sample-roast,サンプル焙煎機,sample-roast.example
+comp-b,competitor,見本ロースター,見本ロースター|mihon roaster,,mihon-roaster.example

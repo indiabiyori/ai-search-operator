@@ -187,7 +187,7 @@ entities.csv にないホストのうち競合の公式サイトは、01-setup.m
 | Google の AI モード | 回答の下の低評価アイコンをクリックし、［送信］で送る | [Google 検索の AI モード](https://support.google.com/websearch/answer/16011537?hl=ja&co=GENIE.Platform%3DDesktop) |
 | Copilot | 確認できていない。Microsoft のサポートで見つかったのは Microsoft 365 の Copilot の手順だけだった。画面で機能を確かめる `[要確認: Copilot の回答へのフィードバックの手順]` | — |
 
-- Perplexity は、観測の対象にするかを利用者が利用規約を読んで決める（03-observation.md）ため、この表に入れていない。
+- Perplexity は、一般向けの画面での観測をこのスキルでは扱わない（[services/perplexity.md](services/perplexity.md)）ため、この表に入れていない。
 - フィードバックと一緒に、Gemini ではプロンプトと回答を含む会話が、Google の AI による概要と AI モードでは最近の検索クエリとその検索結果が送られる（表の出典の各ヘルプに記載）。フィードバックの欄にも、送る前に尋ねたプロンプトや検索にも、個人情報や社外秘の情報を入れない。
 - 送った日、サービス、回答ファイル、送った内容を記録する（例: `ai-search/reports/` のメモ）。その後の観測で誤りが減っても、フィードバックが効いたとは断定しない。
 

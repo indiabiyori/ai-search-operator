@@ -2,6 +2,8 @@
 
 AI サービスに同じ条件で繰り返し尋ね、回答の原文を1回答1ファイルで残し、言及率・引用率を件数（k/n）付きで出すまでの手順。ラウンドの決め方、サービスごとの条件のそろえ方、回答ファイルの書き方、`new_round.py` → 貼り付け → `normalize_observations.py` → `compare_runs.py --period` の流れ、回答の正誤の判定を扱う。
 
+サービスごとの観測条件（公式資料で確認した事実、観測するときの手順、最初の観測で確かめること）は、`services/` の下にサービスごとのファイルで分けてある。この手順書と一緒に、観測するサービスのファイルだけを読む（下の「サービスごとの既定の案」の表）。
+
 この手順書での言葉の意味は次のとおり。言及は、回答の本文に自社のブランド名（entities.csv の表記ゆれ）が出ること。引用は、自社のドメインの URL が出典の欄か本文のリンクにあること。有効な回答は、言及率・引用率の分母に入れる回答（observations.csv の `valid_mention` / `valid_citation` が 1）。
 
 ## 1. 目的
@@ -20,14 +22,14 @@ AI サービスに同じ条件で繰り返し尋ね、回答の原文を1回答1
 | 自社・競合の表記ゆれとドメイン | `ai-search/entities.csv`（[01-setup.md](01-setup.md) の手順で作る） | 必須 | normalize_observations.py は entities.csv がないと終了コード 2 で止まる。先に 01 で作る |
 | 正しい事実の一覧 | `ai-search/brief.md` の「正しい事実の一覧」（01 で作る。項目、正しい値、出典、確認日） | 正誤の判定に必須 | accuracy を `未確認` のまま残し、`[要追加: 正しい事実の一覧（brief.md）]` と報告する。回答の内容から正しい値を推測しない |
 | 観測の条件の決まり | `ai-search/brief.md` の「観測の条件の決まり」 | 任意 | この手順書の既定（下の「ラウンドの決まり」）で始め、決めた条件を brief.md に書き足す |
-| AI サービスの画面 | ブラウザ（またはアプリ）で各サービスを開く。条件は下の「サービスごとの既定の案」と、末尾の付録「サービスごとの観測条件」 | 必須 | Claude は代わりに尋ねない。Claude の Web 検索ツールの結果を、AI サービスの回答として記録しない |
+| AI サービスの画面 | ブラウザ（またはアプリ）で各サービスを開く。条件は下の「サービスごとの既定の案」と、観測するサービスのファイル（`services/`） | 必須 | Claude は代わりに尋ねない。Claude の Web 検索ツールの結果を、AI サービスの回答として記録しない |
 | 回答ファイル | `ai-search/answers/<ラウンド>/<サービス>/<プロンプトID>-<回数>.md`（new_round.py で作り、ユーザーが回答を貼る） | 集計に必須 | 1件もなければ normalize_observations.py は終了コード 2 で止まる。手順3から始める |
 | 実験の記録 | `ai-search/experiments/E001.md` など（[06-experiments.md](06-experiments.md)） | 任意 | 実験中のラウンドでは、対象プロンプトと対照プロンプトを同じラウンドで尋ねる。記録がなければ観測だけの運用として進める |
 
 ## 3. 手順
 
-1. ラウンドの計画を立てる。使うサービス、回数、日程、条件（下の「ラウンドの決まり」）を決め、`ai-search/brief.md` の「観測の条件の決まり」に書く。初めてのサービスでは、付録「サービスごとの観測条件」にある「最初の観測で確かめること」も計画に入れる。
-2. サービスごとの条件を決める。ログイン状態、記憶・パーソナライズの切り方、ウェブ検索の指定、`mode` に書く文字列を、下の「サービスごとの既定の案」から選ぶ。観測の当日は、付録にあるそのサービスの「観測するときの手順」を手元に置く。
+1. ラウンドの計画を立てる。使うサービス、回数、日程、条件（下の「ラウンドの決まり」）を決め、`ai-search/brief.md` の「観測の条件の決まり」に書く。初めてのサービスでは、そのサービスのファイル（`services/`）にある「最初の観測で確かめること」も計画に入れる。
+2. サービスごとの条件を決める。ログイン状態、記憶・パーソナライズの切り方、ウェブ検索の指定、`mode` に書く文字列を、下の「サービスごとの既定の案」から選ぶ。観測の当日は、そのサービスのファイルの「観測するときの手順」を手元に置く。
 3. ひな形を作る。`new_round.py` で、プロンプト × サービス × 回数の数だけ回答ファイルを作る。手順2で決めた `mode` の文字列は `--mode` で入れておく（下の「コマンドの流れ」）。
 4. 尋ねて貼る。1回ごとに新しい会話を開き、回答ファイルの `prompt` の欄の文をそのまま AI に貼って尋ねる。回答を `## 回答` の下に、出典の URL を `## 出典` の下に貼り、`observed_at` に尋ねた日時を書く（下の「回答ファイルの書き方」）。
 5. 記録できなかった回答の `status` と、出典の状態の `sources_status` を書く（下の「status と sources_status の使い分け」）。
@@ -52,16 +54,20 @@ AI サービスに同じ条件で繰り返し尋ね、回答の原文を1回答1
 
 ### サービスごとの既定の案
 
-2026-09-26 に各社の公式資料で確かめた範囲から決めた既定の案。根拠の事実と資料、サービスごとの「観測するときの手順」「最初の観測で確かめること」は、末尾の[付録: サービスごとの観測条件](#付録-サービスごとの観測条件)にある。
+2026-09-26 に各社の公式資料で確かめた範囲から決めた既定の案。根拠の事実と資料、「観測するときの手順」「最初の観測で確かめること」は、表の右端の列にあるサービスごとのファイルに書いた。観測するサービスのファイルだけを読めばよい。
 
-| サービス（`service`） | `login` の既定の案 | 記憶・パーソナライズを切る方法 | `mode` の目安 |
-|---|---|---|---|
-| ChatGPT（`chatgpt`） | `なし` | ログインしないなら不要。ログインするなら一時チャットの「パーソナライズなし」 | 「検索」を手動で指定して `検索あり` |
-| Claude（`claude`） | `あり（記憶オフ）` | シークレットチャット。指示設定も空にする | 従来の画面で Web search をオンにしたら `検索あり`、新しい画面では `自動` |
-| Gemini（`gemini`） | `なし`（使えなければ `あり（記憶オフ）`） | ログインするなら一時チャット | `自動` |
-| Google の AI モード（`google-ai-mode`）、Google の AI による概要（`google-aio`） | `なし` | ブラウザのプライベート ウィンドウを尋ねるたびに開き直す | `検索あり` |
-| Copilot（`copilot`） | `あり（記憶オフ）` | 「保存されたメモリ」と「One shared experience」をオフ | `自動` |
-| Perplexity（`perplexity`） | 規約を読んで観測の対象にするかを先に決める（付録） | — | — |
+| サービス（`service`） | `login` の既定の案 | 記憶・パーソナライズを切る方法 | `mode` の目安 | 読むファイル |
+|---|---|---|---|---|
+| ChatGPT（`chatgpt`） | `なし` | ログインしないなら不要。ログインするなら一時チャットの「パーソナライズなし」 | 「検索」を手動で指定して `検索あり` | [services/chatgpt.md](services/chatgpt.md) |
+| Claude（`claude`） | `あり（記憶オフ）` | シークレットチャット。指示設定も空にする | 従来の画面で Web search をオンにしたら `検索あり`、新しい画面では `自動` | [services/claude-ai.md](services/claude-ai.md) |
+| Gemini（`gemini`） | `なし`（使えなければ `あり（記憶オフ）`） | ログインするなら一時チャット | `自動` | [services/gemini.md](services/gemini.md) |
+| Google の AI モード（`google-ai-mode`）、Google の AI による概要（`google-aio`） | `なし` | ブラウザのプライベート ウィンドウを尋ねるたびに開き直す | `検索あり` | [services/google-ai.md](services/google-ai.md) |
+| Copilot（`copilot`） | `あり（記憶オフ）` | 「保存されたメモリ」と「One shared experience」をオフ | `自動` | [services/copilot.md](services/copilot.md) |
+| Perplexity（`perplexity`） | 非対応。一般向けの画面での観測は、手動でもしない | — | — | [services/perplexity.md](services/perplexity.md)（非対応の理由と規約の要点） |
+
+サービスごとのファイルには、公式資料で確認できたこと（規約の要点を含む）、観測するときの手順、最初の観測で確かめること、資料の4つが、この順で入っている。初めて観測するサービスでは、1ラウンド目の前に「最初の観測で確かめること」を画面で確かめ、結果と確かめた日を brief.md の「観測の条件の決まり」に書く。画面と仕様はよく変わるので、確認日から3か月以上たっていたら、各社のヘルプで確かめ直す。
+
+出典がどういう順で並んでいるのか（関連度順か、引用順か）は、どのサービスの公式資料にも説明が見つからなかった（2026-09-26 に確認）。ChatGPT のヘルプも、検索結果を複数の要素で順位付けしていると書くだけで、情報源が並ぶ順の意味には触れていない（[services/chatgpt.md](services/chatgpt.md) の資料3）。`source_order` は画面の表示順として扱う。コピーボタンで出典の URL が残るかも、どのサービスでも公式資料では確認できていない。
 
 ### コマンドの流れ
 
@@ -149,7 +155,7 @@ reviewed_by:
 | `round` | ラウンド名 | new_round.py |
 | `prompt_id`、`prompt` | prompts.csv の ID と質問文。AI には `prompt` の文をそのまま貼る。書き換えない | new_round.py |
 | `observed_at` | 尋ねた日時（`2026-10-01 14:05` の形）。日付は new_round.py が入れるので、時刻を足し、別の日なら日付も直す。`2026/10/01`、`2026-10-1`、`2026.10.01`、`2026年10月1日` も読み、observations.csv では `YYYY-MM-DD` の形にそろえて出す。有効な回答で日付を読めないと警告が出て、その回答は観測した日数の確認から外れる | new_round.py とユーザー |
-| `service` | `chatgpt` / `claude` / `perplexity` / `gemini` / `copilot` / `google-ai-mode` / `google-aio` | new_round.py |
+| `service` | `chatgpt` / `claude` / `perplexity` / `gemini` / `copilot` / `google-ai-mode` / `google-aio`。`perplexity` は、すでに記録した回答ファイルを読むために残している値で、新しい観測には使わない（[services/perplexity.md](services/perplexity.md)） | new_round.py |
 | `surface` | `web`（ブラウザ）/ `app`（アプリ）/ `api` | new_round.py |
 | `mode` | ラウンドの前に決めた文字列（上の「ラウンドの決まり」） | new_round.py（`--mode`）かユーザー |
 | `login` | `なし` / `あり（記憶オフ）` / `あり`。実際の状態と違えば直す | new_round.py とユーザー |
@@ -203,7 +209,7 @@ ChatGPT の回答をコピーボタンで写すと、出典が Markdown のリ�
 ```
 
 - コピーした文は、定義の行も含めてそのまま `## 回答` に貼る。本文のリンクの URL と末尾の定義の行の URL は、本文のリンク（`location` が `body`）として数える。
-- 出典の並び順（`source_order`）を残すには、「情報源」に並ぶ順に URL を `## 出典` に写す（引用された情報源だけ。付録の ChatGPT の節）。定義の行は `## 回答` に残したままにする。回答の欄と出典の欄に同じ URL があっても、出典の欄の URL として1回だけ数える。出典の欄を空のままにすると、引用は数えられるが `source_order` が付かず、compare_runs.py の出典の並び順では「本文のリンクだけ」に入る。
+- 出典の並び順（`source_order`）を残すには、「情報源」に並ぶ順に URL を `## 出典` に写す（引用された情報源だけ。[services/chatgpt.md](services/chatgpt.md) の「観測するときの手順」）。定義の行は `## 回答` に残したままにする。回答の欄と出典の欄に同じ URL があっても、出典の欄の URL として1回だけ数える。出典の欄を空のままにすると、引用は数えられるが `source_order` が付かず、compare_runs.py の出典の並び順では「本文のリンクだけ」に入る。
 - チップの文字は、ドメイン（`kakuu-coffee.example`）でもサイト名（`サンプル焙煎`）でも、言及に数えない（上の「Markdown のリンクの読み方」）。この例で自社と競合の言及ありになるのは、本文に「架空珈琲は」「サンプル焙煎の豆」とあるため。チップにだけ出た社名は言及にならない。
 
 ### status と sources_status の使い分け
@@ -268,7 +274,7 @@ observations.csv の `exclusion_reason` には、回答を言及率や引用率�
 
 このスキルは、AI サービスの画面の自動操作やスクレイピングで回答を集めない。ユーザーが画面で尋ね、回答を貼る。
 
-- 規約: 付録の各節のとおり、ChatGPT、Claude、Copilot は、自動の手段（ボット、スクレイパー、プログラム）による取得やアクセスを利用規約で禁じている。Google は、robots.txt などに反する自動化された手段でのアクセスを禁じており、www.google.com の robots.txt は `/search` を、gemini.google.com の robots.txt は `/app/` と `/chat/` を拒否している。Google 検索への自動のクエリは、スパムに関するポリシーの機械生成トラフィックにも当たる。Perplexity は手作業による監視・収集も禁じている。
+- 規約: サービスごとのファイル（`services/`）の「規約の要点」のとおり、ChatGPT、Claude、Copilot は、自動の手段（ボット、スクレイパー、プログラム）による取得やアクセスを利用規約で禁じている。Google は、robots.txt などに反する自動化された手段でのアクセスを禁じており、www.google.com の robots.txt は `/search` を、gemini.google.com の robots.txt は `/app/` と `/chat/` を拒否している。Google 検索への自動のクエリは、スパムに関するポリシーの機械生成トラフィックにも当たる。Perplexity の一般向けの利用規約は手作業による監視・収集も禁じているので、このスキルは手動の観測にも使わない（[services/perplexity.md](services/perplexity.md)）。
 - 再現性: 自動操作で取った回答が、人が画面で見る回答と同じになる保証はない。ログイン状態、パーソナライズ、表示の形が変わりうる。
 - API による自動の収集は v1.0.0 の範囲外。回答ファイルの `surface` に `api` を用意しているのは、将来 API の結果も同じ CSV に入れられるようにするため。
 
@@ -280,7 +286,7 @@ ai-search-operator の 03-observation.md に従って、観測ラウンド {2026
 - 回数: 各3回、{2026-10-01} と {2026-10-02} に分けて尋ねる
 - 対象: prompts.csv の active=yes の全件
 new_round.py の --help を確かめてからひな形を作り（mode は --mode で入れる）、作ったファイルの数と1ラウンドの記録数を教えてください。
-サービスごとの条件（mode に書く文字列、記憶の切り方、出典の写し方）と、最初の観測で確かめることを一覧にしてください。
+services/ の下の該当するファイルを読んで、サービスごとの条件（mode に書く文字列、記憶の切り方、出典の写し方）と、最初の観測で確かめることを一覧にしてください。
 回答は私が画面で尋ねて貼ります。回答を推測で埋めないでください。
 ```
 
@@ -352,240 +358,4 @@ ai-search/brief.md の「正しい事実の一覧」と照らして、ラウン�
 - accuracy だけを書いて `reviewed_by` を空にする: 判定を書いても未確認に数えられる。ユーザーが判定したら `human` と書く。
 - 回答の欄を読みやすく直す: 原文でなくなり、言及の判定も変わる。貼ったままにする。
 - ブラウザの自動操作やスクレイピングで回答を集める: 各社の規約に触れる（上の「自動取得をしない理由」）。
-- Perplexity を既定で観測に入れる: 利用規約は手作業による収集も禁じている。入れるかはユーザーが規約を読んで決める。
-
-## 付録: サービスごとの観測条件
-
-各社の公式資料で 2026-09-26 に確認できた範囲だけを書く。サービスごとに、確認できた事実の表、観測するときの手順、最初の観測で確かめること、資料の順に並べた。3章の「サービスごとの既定の案」は、この付録の事実から決めている。
-
-初めて観測するサービスでは、1ラウンド目の前に「最初の観測で確かめること」を画面で確かめ、結果と確かめた日を brief.md の「観測の条件の決まり」に書く。画面と仕様はよく変わるので、確認日から3か月以上たっていたら、各社のヘルプで確かめ直す。
-
-出典がどういう順で並んでいるのか（関連度順か、引用順か）は、どのサービスの公式資料にも説明が見つからなかった。ChatGPT のヘルプも、検索結果を複数の要素で順位付けしていると書くだけで、情報源が並ぶ順の意味には触れていない（ChatGPT の資料3）。`source_order` は画面の表示順として扱う。コピーボタンで出典の URL が残るかも、どのサービスでも公式資料では確認できていない。
-
-### ChatGPT（`chatgpt`）
-
-| 項目 | 2026-09-26 に公式資料で確認できたこと |
-|---|---|
-| ログインなし | アカウントを作らずに chatgpt.com で使える。ログインなしの利用は対応国に展開中で、欧州では英国を除き未提供（資料1） |
-| ログアウト中の会話 | 同時に1つの会話しか持てず、新しいチャットを始めると前の会話は開けない。履歴も保存されない（資料1） |
-| ウェブ検索 | 最新の情報が役立つ質問では、モデルの判断で自動で検索することがあり、サインインしていない人も使える（資料2・3） |
-| 検索の指定 | 「すべてのツールを表示」から「検索」を選ぶか、入力欄に「/」を入れて「検索」を選ぶと、検索を手で指定できる（資料3） |
-| 一時チャット | 最初のメッセージを送る前に「パーソナライズなし」を選ぶと、メモリ、カスタム指示、プラグインを使わない。会話を始めたあとは変えられない（資料4） |
-| メモリと検索 | メモリが有効だと、検索のクエリを書き換えるときに保存済みのメモリを使うことがある（資料2） |
-| 出典の表示 | 検索を使った回答には引用が含まれることがある。「情報源」を選ぶと、引用された情報源に加えて、その他の関連リンクも表示される（資料3） |
-| 広告 | 回答の末尾の下に、スポンサーと明示して表示される（資料5） |
-| 地域・言語 | 地域に関連する結果のため、IP アドレスから推定したおおよその位置を使うことがあり、デバイスの位置情報の共有は初期設定でオフ（資料3）。画面の表示言語はブラウザの設定から自動で決まる（資料6） |
-| 規約の要点 | EEA・スイス・英国以外の居住者向けの利用規約（2026年1月1日発効）は、データやアウトプットを自動またはプログラムで引き出すことを禁じている（資料7） |
-
-観測するときの手順:
-
-- ログインせずに尋ね、`login` を `なし` にする。ログインするなら、一時チャットで最初のメッセージの前に「パーソナライズなし」を選び、`login` を `あり（記憶オフ）` にする。
-- 検索は毎回手で指定し、`mode` を `検索あり` にする。
-- ログアウト中は、新しいチャットを始めると前の会話が開けなくなる。回答と出典を写し終えてから、次のチャットを始める。
-- 出典の欄には、引用された情報源だけを写す。その他の関連リンクと、スポンサーと表示された広告は写さない。
-
-最初の観測で確かめること:
-
-- 日本からログインなしで使えるか（日本を名指しした公式の記述はない）
-- ログアウト中に、ツールの「検索」が表示されるか
-- 「情報源」の一覧で、引用とその他の関連リンクがどう分かれて表示されるか
-- コピーボタンで出典の URL が残るか。共有リンクに出典が残るか
-
-資料:
-1. https://help.openai.com/en/articles/9125172-the-chatgpt-home-page
-2. https://help.openai.com/en/articles/9237897-searching-the-web-with-chatgpt
-3. https://help.openai.com/ja-jp/articles/9237897-searching-the-web-with-chatgpt
-4. https://help.openai.com/ja-jp/articles/8914046-temporary-chat-in-chatgpt （英語版 https://help.openai.com/en/articles/8914046-temporary-chat-in-chatgpt ）
-5. https://help.openai.com/en/articles/20001047-ads-in-chatgpt
-6. https://help.openai.com/en/articles/8357869-how-to-change-your-language-setting-in-chatgpt
-7. https://openai.com/ja-JP/policies/row-terms-of-use/ （英語版 https://openai.com/policies/row-terms-of-use/ ）
-
-### Claude（`claude`）
-
-| 項目 | 2026-09-26 に公式資料で確認できたこと |
-|---|---|
-| ログインなし | アカウントの作成には対応地域の電話番号による SMS 認証が要り、省略できない（資料1）。ログインせずに使えるという公式の記述は見つからなかった |
-| ウェブ検索（従来の画面） | 入力欄の左下の「+」から「Web search」を選んでオンにする。無料プランでも使える（資料2・3） |
-| ウェブ検索（新しい画面） | 2026年9月16日に発表された新しい画面には検索のトグルがなく、Claude が役立つと判断したときに検索する。新しい画面が届く時期はアカウントごとに違う（資料4・9） |
-| 検索の指示 | 確実に検索させるには、プロンプトに「Search the web」などを入れるよう案内されている（資料3） |
-| シークレットチャット | 全プランで使え、既存のメモリを使わず、履歴にも残らない。ただし、プロフィールの情報（personal preferences など）には Claude がアクセスできる（資料5） |
-| 指示の設定 | 「Instructions for Claude」はすべての会話に適用される（資料6） |
-| 出典の表示 | ウェブ検索を使った応答には、出典の引用（citations）とソースへのリンクが付くと説明されている。見た目の形は説明されていない（資料3） |
-| 地域・言語 | 表示言語の設定と関係なく、話しかけた言語で応答する（資料7）。地域に合わせた結果を求められたときは、IP アドレスから推定した位置を使うことがある（資料3） |
-| 規約の要点 | Consumer Terms（2025年10月8日発効）は、規約で認められた範囲を超えるクロール・スクレイピング・収集と、API キー経由などを除く、ボットやスクリプトなど自動化された手段でのアクセスを禁じている（資料8） |
-
-観測するときの手順:
-
-- ログインし、プロジェクトの外で、右上のゴーストアイコンからシークレットチャットを始める。`login` は `あり（記憶オフ）` にする。
-- 観測の間は「Instructions for Claude」を空にする。
-- どちらの画面で尋ねたかを brief.md に書く。`mode` は、従来の画面で Web search をオンにしたら `検索あり`、新しい画面では `自動` にする。
-- プロンプトに検索の指示は足さない。足すと他のサービスと質問文がそろわなくなる。足すなら、足す文を brief.md に書いて全回答で同じにし、`mode` を `検索指示あり` にする。
-- シークレットチャットは履歴に残らないので、閉じる前に回答と出典を写す。
-
-最初の観測で確かめること:
-
-- シークレットチャットの中でウェブ検索のトグルを使えるか（新しい画面でも、シークレットチャットは従来の画面で開く、と資料4・5にある）
-- 出典がどんな形で、どういう順に表示されるか
-- コピーボタンで出典の URL が残るか。共有リンクに出典が残るか
-
-資料:
-1. https://support.claude.com/en/articles/8287232-verify-your-phone-number
-2. https://claude.com/pricing
-3. https://support.claude.com/en/articles/10684626-enable-and-use-web-search
-4. https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude
-5. https://support.claude.com/en/articles/12260368-use-incognito-chats
-6. https://support.claude.com/en/articles/10185728-understanding-claude-s-personalization-features
-7. https://support.claude.com/en/articles/10769299-how-to-use-claude-in-your-preferred-language
-8. https://www.anthropic.com/legal/consumer-terms
-9. https://claude.com/blog/cowork-is-now-claude
-
-### Gemini（`gemini`）
-
-| 項目 | 2026-09-26 に公式資料で確認できたこと |
-|---|---|
-| ログインなし | 地域やデバイスの種類によっては、一部の機能をログインせずに使える。ログアウト中は、過去のチャット、パーソナライズされた回答、アプリ連携、モデルの切り替えが使えない（資料1） |
-| アプリ | Android のモバイルアプリはログインが必須（資料1） |
-| ウェブ検索 | 回答の一部は検索結果に基づき、すべての回答が検索に基づくわけではない（資料3）。Google 検索の公開情報は、ログアウト中でも使われる（資料2） |
-| 検索の指定 | 通常のチャットで検索を必ず使わせる方法は、公式資料で見つからなかった |
-| 一時チャット | パソコン版では「New chat」の横の「Temporary chat」から始め、パーソナライズされた回答が出ず、今後のパーソナライズにも使われない。個人の Google アカウントでのログインが要る（資料4。英語版ヘルプの記述） |
-| パーソナル インテリジェンス | ツールの［パーソナル インテリジェンス］をオフにしたチャットもアクティビティに保存され、別のチャットのパーソナライズに使われるため、ヘルプは一時チャットを勧めている（資料5） |
-| 出典の表示 | ソースがある回答では、回答の下か回答内に［ソース］ボタンが出て、押すと右側に関連リンクが並ぶ。［ソース］ボタンがない回答は、リンクを提供しなかったもの（資料6） |
-| 過去のチャットの参照 | 過去のチャットを参照した回答には［以前のチャット］と表示される（資料7） |
-| 地域・言語 | 表示言語はブラウザかデバイスの設定に従い、プロンプトは対応言語で理解して回答する（資料8）。位置情報は常に収集され、既定では IP アドレスかアカウントの住所から推定したおおよその地域が使われる（資料11） |
-| 規約の要点 | Gemini アプリには Google 利用規約と「生成 AI の使用禁止に関するポリシー」が適用され（資料3）、Google 利用規約は robots.txt などの機械可読な指示に反した自動化された手段でのアクセスを禁じている（資料9）。gemini.google.com の robots.txt は `/app/` と `/chat/` を拒否している（資料10） |
-
-観測するときの手順:
-
-- ログインせずに尋ね、`login` を `なし` にする。ログインしないと使えなければ、一時チャットで尋ねて `login` を `あり（記憶オフ）` にする。［パーソナル インテリジェンス］をオフにするだけでは、記憶は切れない。
-- `mode` は `自動` にする。検索を必ず使わせる方法がないため。
-- ［ソース］ボタンがない回答は、`sources_status` を `なし` にする。
-- 回答に［以前のチャット］と表示されたら、記憶が切れていない。一時チャットで尋ねているかを確かめ、条件を見直す。
-
-最初の観測で確かめること:
-
-- 日本からログインなしで使えるか。ログアウト中の回答に［ソース］ボタンが出るか
-- ログアウト中にどのモデルが使われるか（画面に表示されれば `mode` に書く）
-- 日本語の画面で、一時チャットのボタンが何と表示されるか
-- 本文中に出典がどんな形で表示されるか
-- 回答全体をコピーしたときに出典の URL が残るか
-
-資料:
-1. https://support.google.com/gemini/answer/13275745?hl=ja&co=GENIE.Platform%3DDesktop
-2. https://support.google.com/gemini/answer/13695044?hl=ja&co=GENIE.Platform%3DDesktop
-3. https://support.google.com/gemini/answer/13594961?hl=ja
-4. https://support.google.com/gemini/answer/13275745?hl=en&co=GENIE.Platform%3DDesktop
-5. https://support.google.com/gemini/answer/16598406?hl=ja&co=GENIE.Platform%3DDesktop
-6. https://support.google.com/gemini/answer/14143489?hl=ja&co=GENIE.Platform%3DDesktop
-7. https://support.google.com/gemini/answer/13666746?hl=ja&co=GENIE.Platform%3DDesktop
-8. https://support.google.com/gemini/answer/15984485?hl=ja&co=GENIE.Platform%3DDesktop
-9. https://policies.google.com/terms?hl=ja
-10. https://gemini.google.com/robots.txt
-11. https://support.google.com/gemini/answer/13594961?hl=en
-
-### Google の AI モード（`google-ai-mode`）と AI による概要（`google-aio`）
-
-| 項目 | 2026-09-26 に公式資料で確認できたこと |
-|---|---|
-| ログインなし | AI による概要のヘルプは提供対象を「すべてのユーザー」とし、ログインの条件を書いていない（資料1）。AI モードのヘルプにあるログインが必要という記載は Gemini 3 Pro の節のもので、AI モード全体の条件としては書かれていない（資料2） |
-| AI モードの開き方 | google.com/ai、検索結果の［AI モード］、Google アプリの AI モードのアイコンから開く（資料2） |
-| AI の回答が出ない場合 | AI による概要は、システムが有用と判断したときだけ表示され、表示させる操作は案内されていない（資料3）。AI モードも、回答に十分な確信がないときは、AI の回答ではなくウェブリンクの一覧を表示することがある（資料2） |
-| 追加の質問 | AI による概要の［もっと見る］から追加の質問をすると、AI モードの会話に移る（資料3） |
-| パーソナライズ | ログアウト中でも検索関連のアクティビティで結果がカスタマイズされることがあり、止めるには「検索カスタマイズ」を無効にするか、プライベートに検索するよう案内されている（資料4）。ログイン中は「パーソナライズされたおすすめ表示」をオフにしても、現在地、言語、端末の種類、直近の検索の文脈は使われる（資料5） |
-| 出典の表示 | 回答の本文のすぐ横にリンクが表示され、回答の末尾に次に読む先のリンクの提案が出ることがある（資料6、2026年5月6日の公式ブログ）。AI による概要と AI モードでは、回答とリンクの組み合わせが異なる場合がある（資料7） |
-| 地域・言語 | 現在地は端末の位置情報、登録した住所、過去のアクティビティ、IP アドレスから推定され、どの方法で推定したかは検索結果ページの下部で確かめられる（資料8）。これは通常の検索結果の説明で、AI の回答が地域の設定で変わるかを明記した公式資料は見つからなかった |
-| 規約の要点 | Google 利用規約（2026年7月30日発効）は robots.txt などに反した自動化された手段でのアクセスを禁じ（資料9）、www.google.com の robots.txt は `/search` を拒否している（資料10）。Google 検索のスパムに関するポリシーは、明示的な許可なく Google に自動でクエリを送ること（順位の確認のためのスクレイピングを含む）を機械生成トラフィックとしている（資料11） |
-
-観測するときの手順:
-
-- 尋ねるたびにブラウザのプライベート ウィンドウを閉じて開き直し、ログインせずに尋ねる（`login` は `なし`）。直近の検索の文脈を持ち込まないため。
-- `mode` は `検索あり` にする。
-- AI による概要が表示されなかったとき、AI モードがリンクの一覧だけを表示したときは、`status` を `AI の回答なし` にする。
-- `google-aio` の観測では、［もっと見る］から追加の質問をしない。
-- `region` を書く前に、検索結果ページの下部の現在地を確かめる。
-
-最初の観測で確かめること:
-
-- 日本でログインせずに AI モードを使えるか。プライベート ウィンドウで AI モードが動くか
-- AI モードで新しい会話を始めるにはどう操作するか
-- 出典のリンクが画面のどこに、どんな形で並ぶか
-- コピーしたときに出典の URL が残るか
-
-資料:
-1. https://support.google.com/websearch/answer/14901683?hl=en
-2. https://support.google.com/websearch/answer/16011537?hl=ja&co=GENIE.Platform%3DDesktop （リンクの一覧を表示することがある点は英語版 https://support.google.com/websearch/answer/16011537?hl=en&co=GENIE.Platform%3DDesktop ）
-3. https://support.google.com/websearch/answer/14901683?hl=ja
-4. https://support.google.com/websearch/answer/17024959?hl=en
-5. https://support.google.com/websearch/answer/17026260?hl=en
-6. https://blog.google/products-and-platforms/products/search/explore-web-generative-ai-search/
-7. https://developers.google.com/search/docs/appearance/ai-features?hl=ja
-8. https://support.google.com/websearch/answer/179386?hl=en&co=GENIE.Platform%3DDesktop
-9. https://policies.google.com/terms?hl=en-US
-10. https://www.google.com/robots.txt
-11. https://developers.google.com/search/docs/essentials/spam-policies?hl=ja
-
-### Copilot（`copilot`）
-
-| 項目 | 2026-09-26 に公式資料で確認できたこと |
-|---|---|
-| アカウント | Microsoft Copilot 補足使用条件（2026年8月18日発効）は、Copilot を使用するには Microsoft アカウントを持っている必要があると書いている。サインインを求める文言ではない（資料1） |
-| サインインなし | サポート記事には「Sign in isn't required」とあり、サインインすると履歴などの機能が使えると書かれている（資料2）。使用条件との関係は読み方が分かれる |
-| ウェブ検索 | 個人向けの Transparency Note によると、ウェブからのグラウンディングが要るかはシステムが判断する（資料3）。設定の「Web 検索」はオフにできるトグルで、毎回検索させる機能とは書かれていない（資料4） |
-| 会話モード | 2025年7月の記事には会話モードの「Search」があるが（資料5）、2026年8月18日以降の新しいアプリに残っているかは確認できていない |
-| メモリ | ［設定］→［個人用設定］の「保存されたメモリ」をオフにすると、新しいメモリを保存しなくなる。保存済みのメモリは消えない（資料6） |
-| パーソナライズ | 「One shared experience」をオフにすると、Bing・Edge・MSN の利用状況を使ったパーソナライズが止まる。Edge 側は Edge の設定で別にオフにする（資料6） |
-| 出典の表示 | ウェブにもとづく回答には、本文の下にハイパーリンク付きの引用が並ぶ（資料3）。回答の下の Sources ボタンで出典を確かめる手順は、職場・学校アカウント向けの記事にある（資料7） |
-| 地域・言語 | 機能や動作は地域によって異なる場合があり（資料2）、地域を手で設定する方法は個人向けの公式資料で見つからなかった。提供されていない市場の例外に日本は含まれず、テキストの対応言語に日本語が含まれる（資料8） |
-| 規約の要点 | 補足使用条件は、ボットやスクレイパーなどのツールやプログラムで Copilot にアクセスすることを禁じている（資料1）。Microsoft サービス規約は、明示的な許可がない限り、スクレイピングなどで AI サービスからデータを取り出すことを禁じている（資料9） |
-
-観測するときの手順:
-
-- 補足使用条件がアカウントを持つことを求めているので、サインインして尋ねる案を既定にし、`login` を `あり（記憶オフ）` にする。
-- 観測の前に「保存されたメモリ」をオフにし、保存済みのメモリを［管理］から削除する。「One shared experience」もオフにし、Edge を使うなら Edge の設定でも切る。
-- `mode` は `自動` にする。
-- 人が手で尋ねて結果を記録する観測がどこまで認められるかを明記した公式資料は、見つからなかった。補足使用条件を自分で読んでから始める。
-
-最初の観測で確かめること:
-
-- 日本からサインインなしで使えるか
-- 個人アカウントで一時チャットを使えるか
-- 毎回検索させる操作があるか
-- 個人向けのアプリで出典がどんな形で表示されるか
-- コピーしたときに出典の URL が残るか
-
-資料:
-1. https://www.microsoft.com/ja-jp/microsoft-copilot/for-individuals/termsofuse
-2. https://support.microsoft.com/en-us/microsoft-365-copilot/what-s-the-difference-between-microsoft-copilot-free-and-copilot-in-microsoft-365
-3. https://support.microsoft.com/en-us/privacy/microsoft-copilot/transparency-note
-4. https://support.microsoft.com/ja-jp/privacy/microsoft-copilot/privacy-controls
-5. https://support.microsoft.com/en-us/microsoft-copilot/conversation-modes-in-microsoft-copilot
-6. https://support.microsoft.com/en-us/privacy/microsoft-copilot/privacy-controls
-7. https://support.microsoft.com/en-us/microsoft-365-copilot/how-web-search-works-in-microsoft-365-copilot-chat-and-agents
-8. https://support.microsoft.com/en-us/microsoft-copilot/supported-regions-and-languages-in-microsoft-copilot
-9. https://www.microsoft.com/en-us/servicesagreement
-
-### Perplexity（`perplexity`）
-
-Perplexity を観測の対象に入れるかは、ユーザーが利用規約を読んで決める。このスキルは Perplexity を既定の例に入れない。`[要確認: Perplexity の利用規約 5.2 と、観測の目的・方法の関係]`
-
-利用規約で確認できたこと（資料1、2026-09-26 に確認）:
-
-- 5.2(i) は、ロボットやスクレイパーなど自動の手段で本サービスから情報を監視・抽出・コピー・収集することに加えて、同じ目的で手作業のプロセスを行うことも禁じている。
-- 5.2(a) は、本サービスで得た情報のダウンロード、コピー、配布、公開などを禁じている（ブラウザの一時的なキャッシュと、規約が明示的に許可した場合を除く）。
-- 1.1.2 は、本サービスが出典であることを示さずに出力を公開することを禁じている。
-
-対象に入れると決めた場合に、ヘルプで確認できた条件:
-
-- サインインせずに使え、ログアウト中のスレッドは匿名で、14日後に失効する（資料2・3）。
-- 質問のたびにウェブを検索し、回答には番号付きの引用が付く（資料4）。Web のオン・オフは、新しいスレッドの開始時にだけ変えられる（資料3）。
-- 通常の検索と Pro Search では使う情報源の数が違うので（資料5）、`mode` に書き分ける。
-- 「Preferred response language」で回答の言語を指定でき、位置情報を設定していなければ、回答は接続元の位置に基づく（資料6）。VPN の利用は推奨されていない（資料2）。
-- コピーボタンで出典の URL が含まれるかは書かれていない（資料7）。
-
-資料:
-1. https://www.perplexity.ai/hub/legal/terms-of-service
-2. https://www.perplexity.ai/help-center/en/articles/10352998-account-management-and-security
-3. https://www.perplexity.ai/help-center/en/articles/10354775-technical-capabilities-of-threads
-4. https://www.perplexity.ai/help-center/en/articles/10352895-how-does-perplexity-work
-5. https://www.perplexity.ai/help-center/en/articles/10352903-what-is-pro-search
-6. https://www.perplexity.ai/help-center/en/articles/10352990-account-settings
-7. https://www.perplexity.ai/help-center/en/articles/10354769-what-is-a-thread
+- 一般向けの Perplexity を観測に入れる: 利用規約が、利用を個人の非営利目的に限り、手作業による監視・収集も禁じている。このスキルでは非対応にしている（[services/perplexity.md](services/perplexity.md)）。

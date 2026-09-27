@@ -23,6 +23,9 @@ normalize_observations.py - 回答ファイルを observations.csv と citations
   observations.run.json  スクリプトの版、実行日時、entities.csv と prompts.csv の SHA-256、件数
   3つとも同じフォルダの一時ファイルに書いてから置き換える。置き換えられない出力（Excel で開いている、
   読み取り専用、同じ名前のフォルダがある）があれば、どれも置き換えずに終了コード 2 で止まる。
+  出力のどれかがシンボリックリンク（リンク先のないものを含む）なら、何も書かずに終了コード 2 で止まる
+  （信頼できない作業フォルダで、リンクを外のファイルに向けて上書きさせられるのを防ぐため）。出力先の
+  フォルダ（--out-dir か --workspace）自体がリンクなのは構わない。
 
 有効な回答の決まり（言及率・引用率の分母に入れるか）:
   - status が空なら、回答の欄に文字があれば「記録済み」、なければ「未記入」とみなす。
@@ -1288,52 +1291,75 @@ def _write_output(path, write):
 def _check_replaceable(path):
     # type: (str) -> None
     """
-    出力先を置き換えられるかを、書き始める前に確かめる。同じ名前のフォルダや普通のファイルでないもの、
-    書き込みで開けないもの（Excel で開いている、読み取り専用）は OSError。ないときは何もしない。
-    書き込みで開くだけで、中身は変えない。
+    出力先を置き換えられるかを、書き始める前に確かめる。同じ名前のフォルダや普通のファイルでないもの
+    （シンボリックリンクを含む）、書き込みで開けないもの（Excel で開いている、読み取り専用）は OSError。
+    ないときは何もしない。書き込みで開くだけで、中身は変えず、ファイルも作らない。リンクはたどらない。
     """
     try:
-        info = os.stat(path)
+        info = os.lstat(path)
     except FileNotFoundError:
         return
     if stat.S_ISDIR(info.st_mode):
         raise IsADirectoryError(21, "同じ名前のフォルダがあります", path)
     if not stat.S_ISREG(info.st_mode):
         raise OSError(0, "普通のファイルではありません", path)
-    with open(path, "ab"):
-        pass
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:  # 確かめている間に消えた
+        return
+    os.close(fd)
 
 
-def _temp_path(path):
-    # type: (str) -> str
-    """出力先と同じフォルダの一時ファイルの名前（. で始まり .tmp で終わる）。"""
+def _create_temp(path):
+    # type: (str) -> tuple
+    """
+    出力先と同じフォルダに一時ファイル（. で始まり .tmp で終わる名前）を新しく作り、(一時ファイルのパス,
+    書き込みで開いたファイル記述子) を返す。O_CREAT | O_EXCL で作るので、同じ名前のファイルやシンボリックリンクが
+    すでにあれば、それを開かずに別の名前で作り直す（tempfile.mkstemp と同じ作り方）。権限は mkstemp の 0600 では
+    なく、open(…, "w") で作ったときと同じ（umask に従う）にする。置き換えた後の出力の権限になるため。
+    """
     folder, name = os.path.split(path)
-    return os.path.join(folder, ".{}.{}.tmp".format(name, uuid.uuid4().hex[:12]))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    for _ in range(100):
+        temp = os.path.join(folder, ".{}.{}.tmp".format(name, uuid.uuid4().hex[:12]))
+        try:
+            return temp, os.open(temp, flags, 0o666)
+        except FileExistsError:
+            continue
+    raise FileExistsError(17, "一時ファイルを作れません（同じ名前のファイルがあります）", folder)
 
 
 def _write_outputs(outputs):
     # type: (list) -> None
     """
-    outputs は (出力先のパス, 書く関数（一時ファイルのパスを受け取る）) の一覧。observations.csv、citations.csv、
-    observations.run.json の3つを、そろった状態でだけ置き換えるために使う。
-      1. すべての出力先を置き換えられるかを確かめる（_check_replaceable）。
-      2. すべてを同じフォルダの一時ファイルに書く。
-      3. os.replace で順に置き換える。
-    1 か 2 で失敗すれば、どの出力も元のまま残る。3 の途中で失敗したとき（1 の後に別のアプリがファイルを開いた、
+    outputs は (出力先のパス, 文字コード, 改行（open の newline）, 書く関数（開いた一時ファイルを受け取る）) の一覧。
+    observations.csv、citations.csv、observations.run.json の3つを、そろった状態でだけ置き換えるために使う。
+      1. 出力先にシンボリックリンク（リンク先のないものを含む）があれば、何も書かずに InputError にする。
+      2. すべての出力先を置き換えられるかを確かめる（_check_replaceable）。
+      3. すべてを同じフォルダの一時ファイルに書く（_create_temp。すでにあるファイルやリンクは開かない）。
+      4. os.replace で順に置き換える。
+    2 か 3 で失敗すれば、どの出力も元のまま残る。4 の途中で失敗したとき（2 の後に別のアプリがファイルを開いた、
     など）は、置き換え済みの出力だけが新しくなる。どの場合も一時ファイルは消し、InputError にする。
-    出力先がシンボリックリンクなら、リンク先のファイルを置き換える（リンクは残す）。
+    リンクを拒むのは、信頼できない作業フォルダで、出力先のリンクを外のファイルに向けて上書きさせられるのを
+    防ぐため。出力先のフォルダ自体（--out-dir、--workspace）がリンクなのは、利用者が指定したものなので構わない。
     """
-    # 出力先がシンボリックリンクなら、リンクそのものではなくリンク先を置き換える（一時ファイルもリンク先のフォルダに作る）
-    outputs = [(os.path.realpath(path), write) for path, write in outputs]
+    for path, _encoding, _newline, _write in outputs:
+        if os.path.islink(path):
+            raise common.InputError("{} がシンボリックリンクです。上書きの対象を外に向けられるのを防ぐため、書きません。"
+                                    "リンクを外すか、--out-dir で別のフォルダを指定してください".format(_printable(path)))
     temps = []
     try:
-        for path, _write in outputs:
+        for path, _encoding, _newline, _write in outputs:
             _write_output(path, lambda: _check_replaceable(path))
-        for path, write in outputs:
-            temp = _temp_path(path)
-            temps.append(temp)
-            _write_output(path, lambda: write(temp))
-        for (path, _write), temp in zip(outputs, temps):
+        for path, encoding, newline, write in outputs:
+            def write_temp():
+                temp, fd = _create_temp(path)
+                temps.append(temp)
+                with os.fdopen(fd, "w", encoding=encoding, newline=newline) as stream:
+                    write(stream)
+            _write_output(path, write_temp)
+        for (path, _encoding, _newline, _write), temp in zip(outputs, temps):
+            # os.replace は出力先のリンクをたどらない（1 の後にリンクに変わっても、リンクそのものを置き換える）
             _write_output(path, lambda: os.replace(temp, path))
     finally:
         for temp in temps:
@@ -1483,17 +1509,19 @@ def _run(args):
         "valid_citation": len(valid_citation),
         "rounds": round_names,
     }
-    def write_run_info(target):
-        with open(target, "w", encoding="utf-8") as f:
-            json.dump(run_info, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+    def write_run_info(stream):
+        json.dump(run_info, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
 
     # 3つの出力は、すべて書けてから置き換える（一部だけ新しくなり、compare_runs.py が古い citations.csv と
-    # 新しい observations.csv を混ぜて読むのを防ぐ）
+    # 新しい observations.csv を混ぜて読むのを防ぐ）。CSV は common.write_csv と同じ書き方（BOM 付き UTF-8、
+    # sanitize_cell を当てる）で、_create_temp が作った一時ファイルに書く
     _write_outputs([
-        (obs_path, lambda target: common.write_csv(target, OBS_FIELDS, observations)),
-        (cit_path, lambda target: common.write_csv(target, CIT_FIELDS, citations)),
-        (run_path, write_run_info),
+        (obs_path, "utf-8-sig", "", lambda stream: common.write_csv_stream(stream, OBS_FIELDS, observations,
+                                                                           sanitize=True)),
+        (cit_path, "utf-8-sig", "", lambda stream: common.write_csv_stream(stream, CIT_FIELDS, citations,
+                                                                           sanitize=True)),
+        (run_path, "utf-8", None, write_run_info),
     ])
 
     # 要約と警告（標準エラー）
